@@ -1,0 +1,34 @@
+# luxdesktop example app -- this whole folder is what add_lux_desktop_app()
+# in ../CMakeLists.txt embeds into a single native binary. Paths below are
+# relative to this file's own directory: the runtime extracts this folder
+# into a temp dir and chdir()s into it before compiling, so "./templates"
+# and "./public" always mean "next to app.lux", regardless of where the
+# final binary is run from.
+
+import window
+
+app:
+    name    "Lux Desktop Demo"
+    templates "./templates"
+
+    static "/static" -> "./public"
+
+    # The window: block is the only place window title/size are set -- see
+    # vendor/lux/src/lux_script/modules/window.cpp. Nothing to touch in
+    # CMakeLists.txt for this.
+    window:
+        title     "Lux Desktop Demo"
+        width     420
+        height    560
+        resizable true
+        icon      "./icon.png"
+
+get endpoint("/"):
+    return render("index.html", count=state.get("count", 0))
+
+post endpoint("/counter/increment"):
+    return { "count": state.incr("count") }
+
+post endpoint("/counter/reset"):
+    state.set("count", 0)
+    return { "count": 0 }

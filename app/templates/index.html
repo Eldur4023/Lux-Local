@@ -1,0 +1,29 @@
+<!doctype html>
+<title>Lux Desktop Demo</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<main>
+    <h1>Lux Desktop</h1>
+    <p>One binary, no runtime to install, no browser engine bundled — just this
+       window talking to itself over loopback.</p>
+
+    <div id="counter">{{ count }}</div>
+
+    <div class="row">
+        <button id="inc">+1</button>
+        <button id="reset">reset</button>
+    </div>
+</main>
+
+<script>
+const counter = document.getElementById("counter");
+
+async function hit(path) {
+    const res = await fetch(path, { method: "POST" });
+    const data = await res.json();
+    counter.textContent = data.count;
+}
+
+document.getElementById("inc").addEventListener("click", () => hit("/counter/increment"));
+document.getElementById("reset").addEventListener("click", () => hit("/counter/reset"));
+</script>
