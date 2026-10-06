@@ -21,11 +21,13 @@ namespace {
 
 // Anything respack itself would never need to ship: version control
 // metadata and editor/OS clutter that could end up inside an app's own
-// source directory.
+// source directory. `data` is the app's RUNTIME state directory (SQLite
+// database, WAL files): embedding it would make the packaged binary carry a
+// stale database and the boot-time extraction overwrite the real one.
 bool should_skip(const fs::path& p) {
     for (const auto& part : p) {
         const std::string s = part.string();
-        if (s == ".git" || s == ".DS_Store") return true;
+        if (s == ".git" || s == ".DS_Store" || s == "data") return true;
     }
     return false;
 }

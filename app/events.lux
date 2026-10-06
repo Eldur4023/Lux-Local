@@ -1,0 +1,64 @@
+# events.lux — Snapshot de eventos para el bombeo del frontend.
+#
+# En Localify existía un bus `broadcast<DomainEvent>` puenteado a la WebView.
+# Aquí no hay canal push desde el backend, así que el transporte del frontend
+# sondea este endpoint cada segundo y SINTETIZA los mismos eventos (mismos
+# nombres, mismos payloads) por diferenciación. La búsqueda remota pendiente
+# se ejecuta aquí: es el único "segundo plano" que el modelo de Lux permite.
+#
+# NOTA: hubo aquí llamadas a window.mpris_update/window.discord_update
+# (integraciones de escritorio). Quedaron guardadas en
+# events.lux.integraciones.ref: para revivirlas hace falta implementar esas
+# funciones nativas en un módulo (ver NATIVE-MODULES.md), porque el reset del
+# repo se llevó el window.cpp parcheado que las definía.
+
+post endpoint("/api/events/poll"):
+    db_init()
+    tick_descargas()
+
+    List<Json> ready = []
+    string rq = state.get("remote_query", "")
+    if rq != "":
+        state.remove("remote_query")
+        Json? trabajo = parse_json(rq)
+        if trabajo != null:
+            string q = jstr(trabajo["q"], "")
+            if q != "":
+                ytm_buscar_pistas(q, 15)
+            ready.add({ "queryId": jint(trabajo["queryId"], 0) })
+
+    EstadoCola e = leer_estado()
+    List<Json> sellos = await sqlite.query("select key, value from settings where key in ('stamp_library','stamp_playlists','stamp_settings')")
+    string s_lib = ""
+    string s_pl = ""
+    string s_aj = ""
+    for int i in range(0, len(sellos)):
+        string k = jstr(sellos[i]["key"], "")
+        if k == "stamp_library":
+            s_lib = jstr(sellos[i]["value"], "")
+        elif k == "stamp_playlists":
+            s_pl = jstr(sellos[i]["value"], "")
+        elif k == "stamp_settings":
+            s_aj = jstr(sellos[i]["value"], "")
+
+    return {
+        "revision": e.revision,
+        "trackId": e.track_id,
+        "status": e.status,
+        "volume": e.volume,
+        "repeat": e.repeat_mode,
+        "shuffle": e.shuffle,
+        "libraryPath": biblioteca_raiz(),
+        "libraryStamp": s_lib,
+        "playlistStamp": s_pl,
+        "settingsStamp": s_aj,
+        "downloads": descargas_activas(),
+        "remoteReady": ready,
+        "estado": estado_dto()
+    }
+
+# Diálogo nativo de fichero: lo resuelve la propia ventana GTK. Solo se llama
+# desde la UI (es decir, con ventana viva).
+post endpoint("/api/native/open-file"):
+    string ruta = await window.open_file()
+    return { "path": ruta }

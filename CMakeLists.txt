@@ -71,12 +71,19 @@ endfunction()
 # reconfigure, and nothing here needs editing when the app's own config
 # changes.
 function(add_lux_desktop_app name)
-    cmake_parse_arguments(APP "" "DIR" "" ${ARGN})
+    cmake_parse_arguments(APP "" "DIR;ID" "" ${ARGN})
     if(NOT APP_DIR)
         message(FATAL_ERROR "add_lux_desktop_app(${name}): DIR is required")
     endif()
+    if(NOT APP_ID)
+        set(APP_ID ${name})
+    endif()
 
     file(GLOB_RECURSE _app_files CONFIGURE_DEPENDS ${APP_DIR}/*)
+    # ./data/ is the app's own RUNTIME state (SQLite database, WAL files):
+    # never embedded into the binary -- extracting a stale build-time copy
+    # over it at boot would destroy the user's library.
+    list(FILTER _app_files EXCLUDE REGEX "${APP_DIR}/data/.*")
     set(_generated ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_resources.cpp)
     add_custom_command(
         OUTPUT  ${_generated}
@@ -87,6 +94,7 @@ function(add_lux_desktop_app name)
     )
 
     add_executable(${name} src/runtime.cpp src/desktop_window.cpp ${_generated})
+    target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
     _lux_desktop_link(${name})
 endfunction()
 
@@ -94,7 +102,7 @@ endfunction()
 # app/ is where the work happens: app.lux, templates/, static assets, window
 # title/size (via the window: block) -- everything. This line is the only
 # thing in this file that ever names it.
-add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app)
+add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 
 # ── Dev mode (src/dev.cpp) ───────────────────────────────────────────────
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own

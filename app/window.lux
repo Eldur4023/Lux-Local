@@ -1,0 +1,47 @@
+# window.lux — Integración con el shell de escritorio.
+#
+# El menú nativo y la bandeja se configuran desde la UI (que es quien sabe
+# que hay ventana): las "acciones" del menú son rutas que el propio WebKit
+# invoca con fetch, que es exactamente el mecanismo de window.set_menu.
+
+post endpoint("/api/setup-window"):
+    window.set_menu([
+        {
+            "label": "Reproducción",
+            "items": [
+                { "label": "Reproducir / Pausar", "action": "/api/player/toggle", "accel": "<Control>p" },
+                { "label": "Siguiente", "action": "/api/player/next", "accel": "<Control>Right" },
+                { "label": "Anterior", "action": "/api/player/previous", "accel": "<Control>Left" }
+            ]
+        },
+        {
+            "label": "Ir a",
+            "items": [
+                { "label": "Inicio", "action": "/api/window/goto/home" },
+                { "label": "Biblioteca", "action": "/api/window/goto/library" },
+                { "label": "Ajustes", "action": "/api/window/goto/settings" }
+            ]
+        }
+    ])
+    window.set_tray("./icon.png", "Localify")
+    return status(204)
+
+# Las rutas del menú "Ir a" navegan la SPA desde dentro del WebView.
+post endpoint("/api/window/goto/:vista", string vista):
+    return html("<script>location.hash = '#/" + vista + "';</script>")
+
+# No hay modo --headless (a diferencia del original): el arranque en sesión
+# (dsh-localify) lanza la ventana normal y la minimiza en cuanto responde,
+# en vez de no mostrarla nunca.
+post endpoint("/api/window/minimize"):
+    window.minimize()
+    return status(204)
+
+# Cuando el candado de instancia única rechaza un segundo lanzamiento
+# (icono del menú, doble clic...), main() llama aquí antes de salir en vez
+# de no hacer nada: sin esto, "abrir la app" con la ventana ya minimizada
+# no tenía ningún efecto visible, y parecía que hacía falta intentarlo
+# varias veces para que "abriera".
+post endpoint("/api/window/restore"):
+    window.restore()
+    return status(204)

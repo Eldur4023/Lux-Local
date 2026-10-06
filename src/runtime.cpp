@@ -117,15 +117,6 @@ void install_window_control_hooks() {
     };
 }
 
-fs::path make_temp_dir(const std::string& prefix) {
-    std::string tmpl = (fs::temp_directory_path() / (prefix + "-XXXXXX")).string();
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    if (!::mkdtemp(buf.data()))
-        throw std::runtime_error("mkdtemp: " + std::string(std::strerror(errno)));
-    return fs::path(buf.data());
-}
-
 void extract_resources(const fs::path& dir) {
     for (const auto& f : kEmbeddedFiles) {
         fs::path dest = dir / f.path;
@@ -295,7 +286,17 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
 int main(int argc, char** argv) {
     bool install = argc > 1 && std::string(argv[1]) == "--install-desktop";
 
-    fs::path work_dir = make_temp_dir("luxdesktop");
+    // Resources are extracted to a PERSISTENT directory (XDG data home), not
+    // a temp one: anything the app writes next to its own sources at runtime
+    // -- today that is the SQLite database under ./data/ -- has to survive
+    // restarts. Re-extracting on every boot only overwrites the read-only
+    // resources themselves (app.lux, templates/, public/); ./data/ is never
+    // part of the embedded set (CMakeLists.txt excludes it from respack).
+#ifndef LUXDESKTOP_APP_ID
+#define LUXDESKTOP_APP_ID "app"
+#endif
+    fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;
+    fs::create_directories(work_dir);
     extract_resources(work_dir);
     fs::current_path(work_dir); // the app's own paths (templates "./templates",
                                  // static "/x" -> "./public") are written
@@ -317,10 +318,9 @@ int main(int argc, char** argv) {
     }
 
     if (install) {
-        int rc = install_desktop(mod, work_dir);
-        std::error_code ec;
-        fs::remove_all(work_dir, ec);
-        return rc;
+        // No remove_all(work_dir) here: unlike the old temp-dir scheme, the
+        // work dir is persistent and holds the app's own data now.
+        return install_desktop(mod, work_dir);
     }
 
     lux::App app;
@@ -408,7 +408,9 @@ int main(int argc, char** argv) {
         g_window = nullptr;
     }
 
-    std::error_code ec;
-    fs::remove_all(work_dir, ec);
+    // work_dir es PERSISTENTE (XDG data home): contiene ./data/ con la base
+    // de datos de la biblioteca. Borrarlo al apagar era del esquema antiguo
+    // de directorio temporal -- con datos persistentes sería perder la
+    // biblioteca entera en cada cierre de ventana.
     return 0;
 }
