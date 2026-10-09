@@ -18,7 +18,7 @@ class MainActivity : Activity() {
         super.onCreate(state)
         LuxLocal.appContext = applicationContext
         askOnce()
-        SyncService.start(this)   // keeps syncing (and notifying) after this Activity is gone
+        Sync.ensureScheduled(this)   // keeps syncing (and notifying) after this Activity is gone
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true

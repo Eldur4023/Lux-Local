@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <application android:label="Lux Local"
         android:allowBackup="false" android:usesCleartextTraffic="true"
@@ -20,11 +19,8 @@
             </intent-filter>
         </activity>
 
-        <!-- Keeps the process (and the Lux server) alive and polls IMAP every few minutes: no push without IDLE. -->
-        <service android:name=".SyncService" android:exported="false" android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="mail-sync" />
-        </service>
-        <receiver android:name=".SyncAlarmReceiver" android:exported="false" />
+        <!-- Polls IMAP every 2 minutes with wake-up alarms (no foreground service, no permanent notification). -->
+        <receiver android:name=".SyncReceiver" android:exported="false" />
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

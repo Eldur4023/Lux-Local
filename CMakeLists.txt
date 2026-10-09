@@ -121,6 +121,8 @@ function(add_lux_desktop_app name)
         target_link_libraries(luxlocal PRIVATE
             -Wl,--whole-archive lux_script -Wl,--no-whole-archive
             lux Threads::Threads log)
+        # 16 KB pages (Android 15+ devices; NDK r26 still defaults to 4 KB), and no symbol tables: the .so was 58 MB.
+        target_link_options(luxlocal PRIVATE -Wl,-z,max-page-size=16384 -Wl,--strip-all)
     else()
         add_executable(${name} src/runtime.cpp src/boot.cpp src/desktop_window.cpp ${_generated})
         target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")

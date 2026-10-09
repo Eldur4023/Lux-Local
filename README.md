@@ -272,10 +272,10 @@ Android, uses `lux_script::keyring_control()` hooks that `src/android.cpp` point
 round-trip, and `imap.uids`/`imap.fetch` against a fake IMAP server. `tools/android-deps.sh` pins curl 8.18.0:
 8.19.0-8.22.0 return an empty body for custom IMAP commands (`UID FETCH ...`).
 
-`window.notify` is wired to a system notification, and `SyncService` (foreground service) keeps the process and the Lux server
-alive with the app closed and polls `POST /api/sync` every 3 minutes -- that route is the app's own business (Mail's notifies new
-mail through `window.notify`); a Lux Desktop app without one simply gets a failed request each time. A Mail-specific CA fix lives in
-`src/android.cpp` (system CAs -> `SSL_CERT_FILE`, picked up by the `http`/`mail`/`imap` modules through `lux_curl_init()`).
+`window.notify` is wired to a system notification. Background sync needs no foreground service (so no permanent notification):
+`Sync.kt` chains wake-up alarms that call `POST /api/sync` every 2 minutes -- that route is the app's own business (Mail's notifies new mail
+through `window.notify`). TLS: `src/android.cpp` builds a PEM bundle from the system CAs (`SSL_CERT_FILE`), which the `http`/`mail`/`imap`
+modules hand to curl through `lux_curl_init()`.
 
 Not done yet: the other `window` hooks (file picker, tray, menu, clipboard) are unset on Android; the debug APK is large (~170 MB,
 unstripped `.so` for two ABIs).
