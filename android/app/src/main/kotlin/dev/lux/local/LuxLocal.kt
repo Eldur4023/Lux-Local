@@ -22,6 +22,8 @@ object LuxLocal {
     /** Starts the app's Lux server on 127.0.0.1; returns its port, or -1 on failure. */
     external fun start(dataDir: String): Int
     external fun stop()
+    /** Sets an environment variable for the app; call before start(). */
+    external fun putenv(key: String, value: String)
 
     // ---- keyring backend: AES-GCM key in the Android Keystore, ciphertext in private SharedPreferences ----
     // Called from native threads (JNI) by name: keep the signatures in sync with src/android.cpp.
@@ -71,7 +73,7 @@ object LuxLocal {
 
     @JvmStatic fun notify(title: String, body: String) {
         val nm = appContext.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("mail", "Correo nuevo", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel("mail", appContext.getString(R.string.notification_channel), NotificationManager.IMPORTANCE_HIGH))
         // POST_NOTIFICATIONS denied => the system silently drops it; nothing to handle here.
         nm.notify(notifId++, Notification.Builder(appContext, "mail").setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title).setContentText(body).setContentIntent(openAppIntent(appContext)).setAutoCancel(true).build())

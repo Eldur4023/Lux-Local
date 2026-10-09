@@ -11,8 +11,15 @@
 // so window.set_title()/notify()... are no-ops until the Android side wires them.
 #include "boot.hpp"
 
+#if __has_include(<lux_script/keyring_control.hpp>)   // only Lux versions with the keyring module
 #include <lux_script/keyring_control.hpp>
+#define LUX_HAS_KEYRING 1
+#endif
 #include <lux_script/window_control.hpp>
+
+#ifdef LUX_TZDATA   // apps whose modules need time zones (Calendar): date/tz library, see lux_script/tz.hpp
+#include <date/tz.h>
+#endif
 
 #include <android/log.h>
 #include <jni.h>
@@ -97,6 +104,7 @@ void install_window_hooks() {
     };
 }
 
+#ifdef LUX_HAS_KEYRING
 void install_keyring_hooks() {
     auto& k = lux_script::keyring_control();
     k.get = [](const std::string& service, const std::string& key) -> std::optional<std::string> {
@@ -116,6 +124,7 @@ void install_keyring_hooks() {
         return env && call_secret(env, "secretDelete", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", service, key, nullptr) != nullptr;
     };
 }
+#endif
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
@@ -123,7 +132,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     g_cls = static_cast<jclass>(env->NewGlobalRef(env->FindClass("dev/lux/local/LuxLocal")));
+#ifdef LUX_HAS_KEYRING
     install_keyring_hooks();
+#endif
     install_window_hooks();
     return JNI_VERSION_1_6;
 }
@@ -138,14 +149,28 @@ Java_dev_lux_local_LuxLocal_start(JNIEnv* env, jobject, jstring data_dir) {
     try {
         std::filesystem::create_directories(work_dir);
         use_system_cas(work_dir);
+#ifdef LUX_TZDATA
+        date::set_install((work_dir / "tzdata").string());   // the IANA text files, extracted from the app's resources
+#endif
         g_server = std::make_unique<LuxServer>(work_dir);
         g_port = g_server->start();
+        if (g_port <= 0) { g_server->stop(); g_server.reset(); g_port = -1; }   // the app did not come up: allow another try
         return g_port;
     } catch (const std::exception& e) {
         __android_log_print(ANDROID_LOG_ERROR, "luxlocal", "%s", e.what());
         g_server.reset();
         return -1;
     }
+}
+
+// Environment for the app (e.g. CALENDAR_TZ): call before start().
+extern "C" JNIEXPORT void JNICALL
+Java_dev_lux_local_LuxLocal_putenv(JNIEnv* env, jobject, jstring key, jstring value) {
+    const char* k = env->GetStringUTFChars(key, nullptr);
+    const char* v = env->GetStringUTFChars(value, nullptr);
+    setenv(k, v, 1);
+    env->ReleaseStringUTFChars(key, k);
+    env->ReleaseStringUTFChars(value, v);
 }
 
 extern "C" JNIEXPORT void JNICALL
