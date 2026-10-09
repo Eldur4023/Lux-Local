@@ -17,6 +17,7 @@ class MainActivity : Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         LuxLocal.appContext = applicationContext
+        LuxLocal.activity = this
         askOnce()
         Sync.ensureScheduled(this)   // keeps syncing (and notifying) after this Activity is gone
         web = WebView(this)
@@ -66,9 +67,22 @@ class MainActivity : Activity() {
     }
 
     override fun onActivityResult(code: Int, result: Int, data: Intent?) {
-        if (code == 1) { chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data)); chooser = null }
+        if (code == LuxLocal.PICK) LuxLocal.onPickResult(result, data)
+        else if (code == 1) { chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data)); chooser = null }
         else super.onActivityResult(code, result, data)
     }
+
+    // Apps that sync real folders (Drive) need "All files access" (Android 11+); asked once. Off here (res/values/config.xml).
+    override fun onResume() {
+        super.onResume()
+        if (resources.getBoolean(R.bool.needs_all_files) && android.os.Build.VERSION.SDK_INT >= 30 &&
+            !android.os.Environment.isExternalStorageManager() && !getSharedPreferences("luxlocal", MODE_PRIVATE).getBoolean("askedFiles", false)) {
+            getSharedPreferences("luxlocal", MODE_PRIVATE).edit().putBoolean("askedFiles", true).apply()
+            runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
+        }
+    }
+
+    override fun onDestroy() { if (LuxLocal.activity === this) LuxLocal.activity = null; super.onDestroy() }
 
     // The page decides what "back" means (close dialog / tab); it answers true if it handled it.
     @Deprecated("fine for a plain Activity")

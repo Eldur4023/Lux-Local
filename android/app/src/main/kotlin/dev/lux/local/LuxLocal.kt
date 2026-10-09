@@ -4,7 +4,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import android.content.Intent
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -77,5 +87,64 @@ object LuxLocal {
         // POST_NOTIFICATIONS denied => the system silently drops it; nothing to handle here.
         nm.notify(notifId++, Notification.Builder(appContext, "mail").setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title).setContentText(body).setContentIntent(openAppIntent(appContext)).setAutoCancel(true).build())
+    }
+
+    // ---- window.* hooks (src/android.cpp calls these from worker threads; the pickers BLOCK until answered) ----
+    const val PICK = 10
+    @Volatile var activity: Activity? = null          // the visible MainActivity, set by it
+    private var pending: CompletableFuture<Intent?>? = null
+
+    private fun askActivity(intent: Intent): Intent? {
+        val act = activity ?: return null
+        val answer = CompletableFuture<Intent?>()
+        pending = answer
+        act.runOnUiThread { try { act.startActivityForResult(intent, PICK) } catch (e: Exception) { answer.complete(null) } }
+        return try { answer.get(10, TimeUnit.MINUTES) } catch (e: Exception) { null }
+    }
+
+    /** MainActivity forwards its onActivityResult for requestCode PICK here. */
+    fun onPickResult(resultCode: Int, data: Intent?) { pending?.complete(if (resultCode == Activity.RESULT_OK) data else null) }
+
+    private fun safeName(n: String) = n.replace(Regex("[/\\\u0000]"), "_").trim().ifEmpty { "archivo" }
+    private fun unique(f: File): File {
+        if (!f.exists()) return f
+        val dot = f.name.lastIndexOf('.').let { if (it <= 0) f.name.length else it }
+        var i = 1
+        while (true) { val c = File(f.parentFile, f.name.substring(0, dot) + " ($i)" + f.name.substring(dot)); if (!c.exists()) return c; i++ }
+    }
+
+    /** save: where a download goes (the public Downloads folder; needs "All files access"), no dialog.
+     *  open: the system file picker; the chosen document is copied to the cache and its path returned ("" if cancelled). */
+    @JvmStatic fun pickFile(suggested: String, save: Boolean): String {
+        if (save) {
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).also { it.mkdirs() }
+            return unique(File(dir, safeName(suggested))).path
+        }
+        val uri = askActivity(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"))?.data ?: return ""
+        return try {
+            val name = appContext.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null } ?: "archivo"
+            val dir = File(appContext.cacheDir, "uploads").also { it.mkdirs() }
+            dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 24 * 3600_000L }?.forEach { it.delete() }
+            val out = unique(File(dir, safeName(name)))
+            appContext.contentResolver.openInputStream(uri)?.use { i -> out.outputStream().use { o -> i.copyTo(o) } }
+            out.path
+        } catch (e: Exception) { "" }
+    }
+
+    /** A folder of the shared storage, as a real path (works for the primary volume and for removable ones). */
+    @JvmStatic fun pickFolder(unused: String): String {
+        val uri: Uri = askActivity(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE))?.data ?: return ""
+        val id = DocumentsContract.getTreeDocumentId(uri)            // "primary:Documents/Foo" or "1A2B-3C4D:Foo"
+        val volume = id.substringBefore(':'); val rel = id.substringAfter(':', "")
+        val root = if (volume == "primary") Environment.getExternalStorageDirectory().path else "/storage/$volume"
+        return if (rel.isEmpty()) root else "$root/$rel"
+    }
+
+    @JvmStatic fun clipboardWrite(text: String): String {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            appContext.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(appContext.applicationInfo.loadLabel(appContext.packageManager), text))
+        }
+        return ""
     }
 }

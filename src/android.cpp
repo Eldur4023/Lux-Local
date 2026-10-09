@@ -91,8 +91,43 @@ void use_system_cas(const std::filesystem::path& dir) {
 }
 
 // window.notify(title, body) -> LuxLocal.notify (a system notification). The other window hooks stay unset.
+// A static LuxLocal method taking and returning strings (and optionally a boolean flag).
+std::string call_string(const char* method, const char* sig, const std::string& a, bool flag, bool with_flag) {
+    JNIEnv* env = env_here();
+    if (!env) return "";
+    jmethodID m = env->GetStaticMethodID(g_cls, method, sig);
+    jstring ja = env->NewStringUTF(a.c_str());
+    jobject r = with_flag ? env->CallStaticObjectMethod(g_cls, m, ja, static_cast<jboolean>(flag))
+                          : env->CallStaticObjectMethod(g_cls, m, ja);
+    env->DeleteLocalRef(ja);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    if (!r) return "";
+    std::string out = to_std(env, static_cast<jstring>(r));
+    env->DeleteLocalRef(r);
+    return out;
+}
+
+// Hooks that only some Lux Desktop versions declare in WindowControl (a template, so the discarded
+// branches are never instantiated for the versions that lack them).
+// pick_file/pick_folder BLOCK the calling worker thread until the user answers an Activity (see LuxLocal.kt).
+template <class Ctl>
+void install_optional_hooks(Ctl& ctl) {
+    if constexpr (requires { ctl.pick_file; })
+        ctl.pick_file = [](const std::string& suggested_name, bool save_mode) {
+            return call_string("pickFile", "(Ljava/lang/String;Z)Ljava/lang/String;", suggested_name, save_mode, true);
+        };
+    if constexpr (requires { ctl.pick_folder; })
+        ctl.pick_folder = []() { return call_string("pickFolder", "(Ljava/lang/String;)Ljava/lang/String;", "", false, false); };
+    if constexpr (requires { ctl.clipboard_write; })
+        ctl.clipboard_write = [](const std::string& text) {
+            call_string("clipboardWrite", "(Ljava/lang/String;)Ljava/lang/String;", text, false, false);
+        };
+}
+
+// window.* -> Android.
 void install_window_hooks() {
-    lux_script::window_control().notify = [](const std::string& title, const std::string& body) {
+    auto& ctl = lux_script::window_control();
+    ctl.notify = [](const std::string& title, const std::string& body) {
         JNIEnv* env = env_here();
         if (!env) return;
         jmethodID m = env->GetStaticMethodID(g_cls, "notify", "(Ljava/lang/String;Ljava/lang/String;)V");
@@ -102,6 +137,7 @@ void install_window_hooks() {
         env->DeleteLocalRef(jt);
         env->DeleteLocalRef(jb);
     };
+    install_optional_hooks(ctl);
 }
 
 #ifdef LUX_HAS_KEYRING
