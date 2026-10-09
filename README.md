@@ -212,6 +212,14 @@ nothing fancier) right as the window closes, and read back before the next
 one opens. The `window:` block's `width`/`height` are the first-launch
 default, not something the window snaps back to on every run.
 
+## Guarding the local API
+
+Loopback is not private on a shared machine or on a phone: other apps can open the port. An app that wants to protect its API keeps a
+secret in `api-token` (mode 600) in its work dir -- created in an `on start:` hook, so it exists before the port opens -- and its routes check it
+(Mail: `require api_ok() else status(401)`, header `X-Mail-Token`). The desktop shell (`src/runtime.cpp`) and the Android Activity read that file and
+hand the secret to the page in the URL fragment (`#t=...`, never sent to the server); the page puts it on every request. The Android boot also
+refuses to start an app that does not declare `host "127.0.0.1"`.
+
 ## Dev mode
 
 There is no separate dev binary any more (the old `app-dev` used a Lux API that no longer exists). For hot reload

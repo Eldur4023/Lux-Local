@@ -1,6 +1,8 @@
 #include "boot.hpp"
 #include "resources.hpp"
 
+#include <lux_script/project.hpp>
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -65,6 +67,19 @@ LuxServer::LuxServer(const fs::path& work_dir) {
     fs::create_directories(work_dir);
     extract_resources(work_dir);
     fs::current_path(work_dir); // the app's own relative paths (./state.db, ./public) expect this CWD
+
+    // The server must only ever be reachable from this phone: Lux binds to whatever the app declares (all
+    // interfaces if it declares nothing), so refuse to start unless app.lux says `host "127.0.0.1"`.
+    // (Same check as the desktop shell's runtime.cpp.)
+    std::vector<fs::path> inputs;
+    std::string error;
+    if (!lux_script::resolve_inputs({"."}, inputs, error)) throw std::runtime_error(error);
+    lux_script::DiagnosticBag diags;
+    auto mod = lux_script::compile(inputs, diags);
+    if (!diags.empty()) throw std::runtime_error(lux_script::format_errors(diags, mod->files));
+    const std::string& host = mod->program.app.host;
+    if (host != "127.0.0.1" && host != "localhost" && host != "::1")
+        throw std::runtime_error("app.lux must declare `host \"127.0.0.1\"` (found \"" + host + "\"): the UI server is for this machine only");
 }
 
 int LuxServer::start() {
