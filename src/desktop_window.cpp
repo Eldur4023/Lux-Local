@@ -6,7 +6,6 @@
 #include <future>
 
 DesktopWindow::DesktopWindow(Options opts) {
-    auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
     if (opts.dark)
         if (GtkSettings* settings = gtk_settings_get_default())
             g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, nullptr);
@@ -17,6 +16,7 @@ DesktopWindow::DesktopWindow(Options opts) {
     if (GdkDisplay* display = gdk_display_get_default())
         gdk_property_delete(gdk_display_get_default_group(display),
                             gdk_atom_intern_static_string("WM_COMMAND"));
+    auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);
@@ -145,11 +145,18 @@ struct FilePickCtx {
     std::promise<std::string> result;
     std::string               suggested_name;
     bool                      save_mode;
+    bool                      folder = false;
 };
 } // namespace
 
+std::string DesktopWindow::pick_folder() { return pick("", false, true); }
+
 std::string DesktopWindow::pick_file(const std::string& suggested_name, bool save_mode) {
-    auto* ctx = new FilePickCtx{{}, suggested_name, save_mode};
+    return pick(suggested_name, save_mode, false);
+}
+
+std::string DesktopWindow::pick(const std::string& suggested_name, bool save_mode, bool folder) {
+    auto* ctx = new FilePickCtx{{}, suggested_name, save_mode, folder};
     auto future = ctx->result.get_future();
 
     // gtk_dialog_run() nests its own main loop until the dialog closes, so
@@ -162,10 +169,11 @@ std::string DesktopWindow::pick_file(const std::string& suggested_name, bool sav
         [](webview_t w, void* arg) {
             auto* ctx = static_cast<FilePickCtx*>(arg);
             GtkWindow* parent = GTK_WINDOW(webview_get_window(w));
-            GtkFileChooserAction action = ctx->save_mode ? GTK_FILE_CHOOSER_ACTION_SAVE
-                                                          : GTK_FILE_CHOOSER_ACTION_OPEN;
+            GtkFileChooserAction action = ctx->folder    ? GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER
+                                        : ctx->save_mode ? GTK_FILE_CHOOSER_ACTION_SAVE
+                                                         : GTK_FILE_CHOOSER_ACTION_OPEN;
             GtkWidget* dialog = gtk_file_chooser_dialog_new(
-                ctx->save_mode ? "Save File" : "Open File", parent, action,
+                ctx->folder ? "Select Folder" : ctx->save_mode ? "Save File" : "Open File", parent, action,
                 "_Cancel", GTK_RESPONSE_CANCEL,
                 ctx->save_mode ? "_Save" : "_Open", GTK_RESPONSE_ACCEPT,
                 nullptr);

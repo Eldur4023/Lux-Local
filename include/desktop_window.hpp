@@ -20,8 +20,8 @@ public:
         int         width     = 1024;
         int         height    = 768;
         bool        resizable = true;
-        bool        devtools  = false;
         bool        dark      = false;
+        bool        devtools  = false;
         std::string icon;             // path to an image file, or empty for none
     };
 
@@ -62,6 +62,9 @@ public:
     // from a thread that can afford to block (window.open_file()/
     // save_file() are `is_async`, so that is always true here).
     std::string pick_file(const std::string& suggested_name, bool save_mode);
+    // Same, as a folder chooser.
+    std::string pick_folder();
+
 
     // A freedesktop desktop notification, sent over the session D-Bus
     // directly (org.freedesktop.Notifications) -- not a libnotify
@@ -98,6 +101,7 @@ public:
     int last_height() const { return last_height_.load(); }
 
 private:
+    std::string pick(const std::string& suggested_name, bool save_mode, bool folder);
     void*             handle_      = nullptr; // webview_t
     void*             menubar_     = nullptr; // GtkWidget* -- null until set_menu()'s first call
     void*             accel_group_ = nullptr; // GtkAccelGroup* -- created alongside menubar_

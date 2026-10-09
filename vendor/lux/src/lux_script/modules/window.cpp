@@ -80,6 +80,11 @@ Value fn_window_open_file(NativeCtx&, std::vector<Value>&, std::string& error) {
     return Value::str(window_control().pick_file("", /*save_mode=*/false));
 }
 
+Value fn_window_open_folder(NativeCtx&, std::vector<Value>&, std::string& error) {
+    if (!window_control().pick_folder) { error = "window: no native window running"; return Value::null(); }
+    return Value::str(window_control().pick_folder());
+}
+
 Value fn_window_save_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "window.save_file() expects a string (suggested file name)"; return Value::null(); }
     if (!window_control().pick_file) { error = "window: no native window running"; return Value::null(); }
@@ -150,6 +155,7 @@ public:
             {"set_always_on_top", 1, 1, fn_window_set_always_on_top},
             {"open_file", 0, 0, fn_window_open_file, /*is_async=*/true},
             {"save_file", 1, 1, fn_window_save_file, /*is_async=*/true},
+            {"open_folder", 0, 0, fn_window_open_folder, /*is_async=*/true},
             {"notify",    2, 2, fn_window_notify},
             {"set_menu",  1, 1, fn_window_set_menu},
             {"set_tray",  2, 2, fn_window_set_tray},
@@ -168,8 +174,8 @@ public:
             else if (key == "width")     cfg.width     = std::atoi(value.c_str());
             else if (key == "height")    cfg.height    = std::atoi(value.c_str());
             else if (key == "resizable") cfg.resizable = (value == "true");
-            else if (key == "devtools")  cfg.devtools  = (value == "true");
             else if (key == "dark")      cfg.dark      = (value == "true");
+            else if (key == "devtools")  cfg.devtools  = (value == "true");
             else if (key == "icon")      cfg.icon      = value;
             else { error = "window: unknown option '" + key + "'"; return false; }
         }

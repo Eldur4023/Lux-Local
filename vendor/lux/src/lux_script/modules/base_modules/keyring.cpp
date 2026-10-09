@@ -111,19 +111,10 @@ Value fn_delete(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 } // namespace
 
-class KeyringModule : public BuiltinModule {
-public:
-    const char* name() const override { return "keyring"; }
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"set", 3, 3, fn_set, true},
-            {"get", 2, 2, fn_get, true},
-            {"delete", 2, 2, fn_delete, true},
-        };
-        return fns;
-    }
-};
-
-LUX_REGISTER_MODULE(KeyringModule)
+LUX_MODULE(keyring, {
+    {"set",    "sss>b", fn_set,    /*is_async=*/true},
+    {"get",    "ss>s",  fn_get,    true},
+    {"delete", "ss>b",  fn_delete, true},
+})
 
 } // namespace lux_script

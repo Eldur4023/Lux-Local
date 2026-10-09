@@ -39,14 +39,6 @@ namespace lux_script {
 
 namespace {
 
-// The vendored crypto.hpp predates hex_encode.
-std::string hex(const std::string& raw) {
-    static const char d[] = "0123456789abcdef";
-    std::string out;
-    for (unsigned char c : raw) { out += d[c >> 4]; out += d[c & 15]; }
-    return out;
-}
-
 struct Config {
     std::string url, user, password, token, from, tls = "starttls";
     bool        configured = false;
@@ -216,9 +208,9 @@ bool build_message(const Value::Dict& m, const Config& cfg, const char* fn, std:
     if (auto r = one_line(field(m, "in_reply_to")); !r.empty()) msg += "In-Reply-To: " + r + "\r\n";
     if (auto r = one_line(field(m, "references")); !r.empty()) msg += "References: " + r + "\r\n";
     msg += "Subject: " + header_text(one_line(field(m, "subject"))) + "\r\n";
-    msg += "Message-ID: <" + hex(crypto::random_bytes(12)) + "@" + domain + ">\r\n";
+    msg += "Message-ID: <" + crypto::hex_encode(crypto::random_bytes(12)) + "@" + domain + ">\r\n";
     msg += "MIME-Version: 1.0\r\n";
-    auto boundary = [] { return "lux-" + hex(crypto::random_bytes(12)); };
+    auto boundary = [] { return "lux-" + crypto::hex_encode(crypto::random_bytes(12)); };
     // Attachments first: those with a "cid" are images the HTML points at (multipart/related with the HTML),
     // the rest travel beside the body (multipart/mixed).
     std::vector<std::string> inline_parts, normal_parts;
@@ -264,7 +256,6 @@ bool build_message(const Value::Dict& m, const Config& cfg, const char* fn, std:
 
 // The finished message as text (bcc left out), e.g. to append it to the Sent folder.
 Value fn_compose(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    if (!a[0].is_dict()) { error = "mail: the argument must be a Dict"; return Value::null(); }
     const auto& m = a[0].as_dict();
     Config cfg;
     if (!resolve_config(m, "mail.compose", cfg, error)) return Value::null();
@@ -275,7 +266,6 @@ Value fn_compose(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_send(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    if (!a[0].is_dict()) { error = "mail: the argument must be a Dict"; return Value::null(); }
     const auto& m = a[0].as_dict();
     Config cfg;
     if (!resolve_config(m, "mail.send", cfg, error)) return Value::null();
@@ -311,7 +301,6 @@ Value fn_send(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // Connects, negotiates TLS and logs in to the smtp Dict's server, then says NOOP and hangs up: nothing is sent.
 // Returns true, or fails with the reason (login refused, no connection...).
 Value fn_check(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    if (!a[0].is_dict()) { error = "mail: the argument must be a Dict"; return Value::null(); }
     if (!a[0].is_dict()) { error = "mail.check: the argument must be a Dict"; return Value::null(); }
     Value::Dict wrapper;
     wrapper["smtp"] = a[0];
@@ -344,9 +333,9 @@ public:
     const char* name() const override { return "mail"; }
     const std::vector<BuiltinModuleFn>& functions() const override {
         static const std::vector<BuiltinModuleFn> fns = {
-            {"send", 1, 1, fn_send, /*is_async=*/true},
-            {"compose", 1, 1, fn_compose},
-            {"check", 1, 1, fn_check, true},
+            {"send", "d>b", fn_send, /*is_async=*/true},
+            {"compose", "d>s", fn_compose},
+            {"check", "d>b", fn_check, /*is_async=*/true},
         };
         return fns;
     }

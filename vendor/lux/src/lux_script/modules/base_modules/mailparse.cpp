@@ -310,8 +310,8 @@ public:
     const char* name() const override { return "mailparse"; }
     const std::vector<BuiltinModuleFn>& functions() const override {
         static const std::vector<BuiltinModuleFn> fns = {
-            {"parse", 1, 1, fn_parse},
-            {"attachment", 2, 2, fn_attachment},
+            {"parse", "s>d", fn_parse},
+            {"attachment", "si>s", fn_attachment},
         };
         return fns;
     }

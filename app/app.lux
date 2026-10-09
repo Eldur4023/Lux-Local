@@ -9,6 +9,8 @@ import window
 
 app:
     name    "Lux Desktop Demo"
+    # Only this machine: the desktop runtime refuses to start otherwise.
+    host    "127.0.0.1"
     templates "./templates"
 
     static "/static" -> "./public"
@@ -32,3 +34,8 @@ post endpoint("/counter/increment"):
 post endpoint("/counter/reset"):
     state.set("count", 0)
     return { "count": 0 }
+
+# Called every few minutes by the Android shell's background alarm (android/.../Sync.kt); a real app puts its
+# periodic work here (Mail syncs, Calendar fires reminders, Drive scans folders).
+post endpoint("/api/sync"):
+    return { "ok": true }

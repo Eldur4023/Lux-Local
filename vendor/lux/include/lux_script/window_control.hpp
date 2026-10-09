@@ -29,6 +29,8 @@ struct WindowControl {
     std::function<void()>                   unfullscreen;
     std::function<void(bool on_top)>        set_always_on_top;
     std::function<std::string(const std::string& suggested_name, bool save_mode)> pick_file;
+    // Same as pick_file, but a folder chooser (GTK SELECT_FOLDER); "" if canceled.
+    std::function<std::string()> pick_folder;
 
     // A desktop notification (freedesktop D-Bus spec, not a webview alert).
     // Synchronous, unlike pick_file: it is a local D-Bus round-trip with no

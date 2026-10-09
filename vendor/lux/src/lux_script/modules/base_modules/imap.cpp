@@ -235,21 +235,8 @@ struct Session {
     }
 };
 
-// The vendored module API has no signature strings: check argument types by hand.
-// d Dict, s string, i int, l List (lowercase letters only, one per argument).
-bool check_args(const std::vector<Value>& a, const char* spec, const char* fn, std::string& error) {
-    for (size_t i = 0; spec[i]; ++i) {
-        const Value& v = a[i];
-        const bool ok = spec[i] == 'd' ? v.is_dict() : spec[i] == 's' ? v.is_str()
-                      : spec[i] == 'i' ? v.is_int() : v.is_list();
-        if (!ok) { error = std::string(fn) + "(): argument " + std::to_string(i + 1) + " has the wrong type"; return false; }
-    }
-    return true;
-}
-
 // Folder + connection common to most functions.
-#define IMAP_PREP(fn, spec)                                                    \
-    if (!check_args(a, spec, fn, error)) return Value::null();                 \
+#define IMAP_PREP(fn)                                                          \
     Conn c;                                                                    \
     if (!parse_conn(a[0], fn, c, error)) return Value::null();                 \
     Session s(c);
@@ -298,7 +285,7 @@ Value words_list(const std::vector<std::string>& w) {
 
 // * LIST (\HasNoChildren \Sent) "/" "[Gmail]/Sent Mail"
 Value fn_list_folders(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.list_folders", "d")
+    IMAP_PREP("imap.list_folders")
     if (!s.run("/", "LIST \"\" \"*\"", "imap.list_folders", error)) return Value::null();
     Value::List out;
     for (const auto& line : lines(s.sink.body)) {
@@ -328,7 +315,7 @@ Value fn_list_folders(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // * STATUS "INBOX" (MESSAGES 3 UIDNEXT 9 UIDVALIDITY 123 UNSEEN 1)
 Value fn_status(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.status", "ds")
+    IMAP_PREP("imap.status")
     std::string q;
     if (!quoted(utf7_encode(a[1].as_str()), q)) { error = "imap.status(): invalid folder name"; return Value::null(); }
     if (!s.run("/", "STATUS " + q + " (MESSAGES UIDNEXT UIDVALIDITY UNSEEN)", "imap.status", error)) return Value::null();
@@ -344,7 +331,7 @@ Value fn_status(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // * 12 FETCH (UID 345 FLAGS (\Seen \Answered))
 Value fn_uids(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.uids", "dsi")
+    IMAP_PREP("imap.uids")
     const long long since = std::max<long long>(1, a[2].as_int());
     if (!s.run("/" + url_box(a[1].as_str()), "UID FETCH " + std::to_string(since) + ":* (FLAGS)", "imap.uids", error))
         return Value::null();
@@ -362,8 +349,7 @@ Value fn_uids(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_fetch(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.fetch", "dsi")
-    if (a.size() > 3 && !a[3].is_str()) { error = "imap.fetch(): the section must be a string"; return Value::null(); }
+    IMAP_PREP("imap.fetch")
     const std::string section = a.size() > 3 ? a[3].as_str() : "";
     if (!plain(section, ".")) { error = "imap.fetch(): invalid section"; return Value::null(); }
     std::string path = "/" + url_box(a[1].as_str()) + ";UID=" + std::to_string(a[2].as_int());
@@ -373,7 +359,7 @@ Value fn_fetch(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_set_flags(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.set_flags", "dsisl")
+    IMAP_PREP("imap.set_flags")
     const std::string mode = a[3].as_str();
     const char* op = mode == "add" ? "+FLAGS.SILENT" : mode == "remove" ? "-FLAGS.SILENT" : mode == "set" ? "FLAGS.SILENT" : nullptr;
     if (!op) { error = "imap.set_flags(): mode is \"add\", \"remove\" or \"set\""; return Value::null(); }
@@ -391,7 +377,7 @@ Value fn_set_flags(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // UID MOVE (RFC 6851); servers without it get COPY + \Deleted + UID EXPUNGE (UIDPLUS).
 Value fn_move(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.move", "dsis")
+    IMAP_PREP("imap.move")
     std::string dest;
     if (!quoted(utf7_encode(a[3].as_str()), dest)) { error = "imap.move(): invalid folder name"; return Value::null(); }
     const std::string path = "/" + url_box(a[1].as_str()), uid = std::to_string(a[2].as_int());
@@ -406,7 +392,7 @@ Value fn_move(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // Folder management. Names are UTF-8; control characters are refused.
 Value fn_create_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.create_folder", "ds")
+    IMAP_PREP("imap.create_folder")
     std::string q;
     if (a[1].as_str().empty() || !quoted(utf7_encode(a[1].as_str()), q)) { error = "imap.create_folder(): invalid folder name"; return Value::null(); }
     if (!s.run("/", "CREATE " + q, "imap.create_folder", error)) return Value::null();
@@ -414,7 +400,7 @@ Value fn_create_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_rename_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.rename_folder", "dss")
+    IMAP_PREP("imap.rename_folder")
     std::string from, to;
     if (a[2].as_str().empty() || !quoted(utf7_encode(a[1].as_str()), from) || !quoted(utf7_encode(a[2].as_str()), to)) {
         error = "imap.rename_folder(): invalid folder name";
@@ -425,7 +411,7 @@ Value fn_rename_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_delete_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.delete_folder", "ds")
+    IMAP_PREP("imap.delete_folder")
     std::string q;
     if (a[1].as_str().empty() || !quoted(utf7_encode(a[1].as_str()), q)) { error = "imap.delete_folder(): invalid folder name"; return Value::null(); }
     if (!s.run("/", "DELETE " + q, "imap.delete_folder", error)) return Value::null();
@@ -435,7 +421,7 @@ Value fn_delete_folder(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // UID of the message whose Message-ID header is `id` in `folder`, or 0 (APPEND does not tell us the
 // uid it gave a new message, so a draft is found again by its Message-ID).
 Value fn_find(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.find", "dss")
+    IMAP_PREP("imap.find")
     std::string q;
     if (!quoted(a[2].as_str(), q)) { error = "imap.find(): invalid Message-ID"; return Value::null(); }
     if (!s.run("/" + url_box(a[1].as_str()), "UID SEARCH HEADER Message-ID " + q, "imap.find", error)) return Value::null();
@@ -449,7 +435,7 @@ Value fn_find(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // Flags the message \Deleted and expunges it (UIDPLUS); on a server without UIDPLUS it stays flagged.
 Value fn_remove(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.remove", "dsi")
+    IMAP_PREP("imap.remove")
     const std::string path = "/" + url_box(a[1].as_str()), uid = std::to_string(a[2].as_int());
     if (!s.run(path, "UID STORE " + uid + " +FLAGS.SILENT (\\Deleted)", "imap.remove", error)) return Value::null();
     std::string ignored;
@@ -460,7 +446,7 @@ Value fn_remove(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // curl's APPEND marks the message \Seen and gives no way to choose other flags; the uid the server
 // assigns is not reported either (find it again by Message-ID with imap.find).
 Value fn_append(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    IMAP_PREP("imap.append", "dss")
+    IMAP_PREP("imap.append")
     const std::string& raw = a[2].as_str();
     Upload up{&raw};
     curl_easy_setopt(s.curl, CURLOPT_UPLOAD, 1L);
@@ -473,28 +459,19 @@ Value fn_append(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 } // namespace
 
-class ImapModule : public BuiltinModule {
-public:
-    const char* name() const override { return "imap"; }
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"list_folders", 1, 1, fn_list_folders, true},
-            {"status", 2, 2, fn_status, true},
-            {"uids", 3, 3, fn_uids, true},
-            {"fetch", 3, 4, fn_fetch, true},
-            {"set_flags", 5, 5, fn_set_flags, true},
-            {"move", 4, 4, fn_move, true},
-            {"append", 3, 3, fn_append, true},
-            {"find", 3, 3, fn_find, true},
-            {"remove", 3, 3, fn_remove, true},
-            {"create_folder", 2, 2, fn_create_folder, true},
-            {"rename_folder", 3, 3, fn_rename_folder, true},
-            {"delete_folder", 2, 2, fn_delete_folder, true},
-        };
-        return fns;
-    }
-};
-
-LUX_REGISTER_MODULE(ImapModule)
+LUX_MODULE(imap, {
+    {"list_folders", "d>l",       fn_list_folders, /*is_async=*/true},
+    {"status",       "ds>d",      fn_status,       true},
+    {"uids",         "dsi>l",     fn_uids,         true},
+    {"fetch",        "dsi|s>s",   fn_fetch,        true},
+    {"set_flags",    "dsisl>b",   fn_set_flags,    true},
+    {"move",         "dsis>b",    fn_move,         true},
+    {"append",       "dss>b",     fn_append,       true},
+    {"find",         "dss>i",     fn_find,         true},
+    {"remove",       "dsi>b",     fn_remove,       true},
+    {"create_folder", "ds>b",     fn_create_folder, true},
+    {"rename_folder", "dss>b",    fn_rename_folder, true},
+    {"delete_folder", "ds>b",     fn_delete_folder, true},
+})
 
 } // namespace lux_script

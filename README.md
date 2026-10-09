@@ -8,11 +8,16 @@ separately, no crate tree to download.
 
 Lux is vendored as plain source under `vendor/lux/` (copied in, not a git
 submodule — no network access needed to build this project once it's
-checked out) and used as a library, with one small, documented addition: a
-`window` module (`vendor/lux/src/lux_script/modules/window.cpp`) using
-Lux's own drop-in module mechanism, purely so window title/size can be
-declared from LuxScript itself instead of from CMake or C++. Nothing about
-how Lux itself works is changed.
+checked out), taken from the `dev` branch of the main Lux repo, with one
+documented addition that is NOT in Lux: a `window` module
+(`vendor/lux/src/lux_script/modules/window.cpp`, `window_config.hpp`,
+`window_control.hpp`) using Lux's own drop-in module mechanism, so window
+title/size/theme can be declared from LuxScript itself and a route can open
+file/folder pickers, notifications, the clipboard... This repo is the home of
+that module; apps vendor it from here. Any change to Lux itself is made in the
+main Lux repo (`dev`) and then re-vendored, never edited in `vendor/lux/`.
+The desktop shell starts the app with Lux's own `main()` (`lux_main()`, built
+with `LUX_EMBEDDED`) on a thread, so it behaves exactly like `lux ./app`.
 
 ## Where you work
 
@@ -182,7 +187,6 @@ needs (llhttp) is vendored inside `vendor/lux/third_party/`.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ./build/app        # the packaged binary -- respack embeds a snapshot of app/
-./build/app-dev     # dev mode -- reads app/ live, hot-reloads on save
 ```
 
 ## Installing it as a real app
@@ -210,14 +214,9 @@ default, not something the window snaps back to on every run.
 
 ## Dev mode
 
-`./build/app-dev` reads `app/` straight off disk instead of an embedded
-snapshot: no `respack`, no rebuilding this binary after editing a `.lux`
-file, a template or a static asset. A background thread watches `app/` and
-recompiles through the same `lux_script::compile()` the packaged binary
-uses — LuxScript compiles to bytecode in milliseconds, no `g++` involved —
-and the window's page reloads on its own once it succeeds. A syntax error
-is printed and the previous, working version keeps serving; the window
-never goes down over a typo. Devtools are always on in this mode.
+There is no separate dev binary any more (the old `app-dev` used a Lux API that no longer exists). For hot reload
+while you work, serve the app with Lux itself and open it in a browser: `./build/vendor/lux/lux app` (the `window`
+module is not available there, so keep window-only calls behind a check or test them in the packaged binary).
 
 ## What this is not (yet)
 
@@ -248,7 +247,8 @@ Build (NDK r26+, API 28 minimum -- bionic has `posix_spawn` from 28; respack run
     cmake --build build-android --target luxlocal
 
 With `http`/`mail`/`imap` (static OpenSSL + libcurl, cross-built by `tools/android-deps.sh`) and SQLite (vendored in
-`third_party/sqlite`, FTS5 on; used automatically on Android):
+`third_party/sqlite`, FTS5 on; used automatically on Android), and the `time` module through `third_party/date` (Hinnant's
+date/tz, because the NDK's libc++ has no C++20 time zone database):
 
     ANDROID_NDK=$ANDROID_NDK tools/android-deps.sh arm64-v8a      # -> build-android-deps/arm64-v8a
     D=$PWD/build-android-deps/arm64-v8a
@@ -266,10 +266,9 @@ Gradle project in `android/` (a plain `Activity` + `WebView` + `LuxLocal.kt`); `
 Checked on an x86_64 emulator (Android 14): the demo app boots, serves over loopback and the +1 button round-trips
 to the Lux server. Not tested on a real arm64 device.
 
-Mail modules (`imap`, `mail`, `mailparse`, `keyring`) are vendored too. `keyring` keeps `secret-tool` on desktop and, on
+The mail modules (`imap`, `mail`, `mailparse`, `keyring`) are part of Lux (`dev`). `keyring` keeps `secret-tool` on desktop and, on
 Android, uses `lux_script::keyring_control()` hooks that `src/android.cpp` points at `LuxLocal.secretGet/Set/Delete`
-(AES-GCM key in the Android Keystore, ciphertext in private SharedPreferences). Checked on the emulator: keyring
-round-trip, and `imap.uids`/`imap.fetch` against a fake IMAP server. `tools/android-deps.sh` pins curl 8.18.0:
+(AES-GCM key in the Android Keystore, ciphertext in private SharedPreferences). `tools/android-deps.sh` pins curl 8.18.0:
 8.19.0-8.22.0 return an empty body for custom IMAP commands (`UID FETCH ...`).
 
 `window.notify` is wired to a system notification. Background sync needs no foreground service (so no permanent notification):
@@ -277,5 +276,6 @@ round-trip, and `imap.uids`/`imap.fetch` against a fake IMAP server. `tools/andr
 through `window.notify`). TLS: `src/android.cpp` builds a PEM bundle from the system CAs (`SSL_CERT_FILE`), which the `http`/`mail`/`imap`
 modules hand to curl through `lux_curl_init()`.
 
-Not done yet: the other `window` hooks (file picker, tray, menu, clipboard) are unset on Android; the debug APK is large (~170 MB,
-unstripped `.so` for two ABIs).
+The `window` hooks wired on Android: `notify`, `pick_file`/`pick_folder` (system document/folder pickers; downloads go to
+Downloads, which needs "All files access": `needs_all_files` in `res/values/config.xml`) and `clipboard_write`. Not wired: tray,
+menu, window sizing, `clipboard_read`.
