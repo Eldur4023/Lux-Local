@@ -21,6 +21,7 @@ public:
         int         height    = 768;
         bool        resizable = true;
         bool        devtools  = false;
+        bool        dark      = false;
         std::string icon;             // path to an image file, or empty for none
     };
 

@@ -23,6 +23,7 @@
 #include <lux_script/builtin_module.hpp>
 
 #include <curl/curl.h>
+#include <lux_script/curl_init.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -117,7 +118,7 @@ Value do_request(const std::string& method, const std::string& url,
         return Value::null();
     }
 
-    CURL* curl = curl_easy_init();
+    CURL* curl = lux_curl_init();
     if (!curl) { error = "http: could not initialize the request"; return Value::null(); }
 
     std::string response_body;

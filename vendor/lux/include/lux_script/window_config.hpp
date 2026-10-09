@@ -19,6 +19,7 @@ struct WindowConfig {
     int         height    = 768;
     bool        resizable = true;
     bool        devtools  = false;
+    bool        dark      = false; // GTK dark theme (native menu bar, dialogs)
     std::string icon;             // path, relative to the app's own directory
 };
 

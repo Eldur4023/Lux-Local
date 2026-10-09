@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
@@ -153,7 +153,10 @@ set(LUX_MODULE_EXCLUDE "" CACHE STRING
 set(_lux_module_exclude
     ${LUX_MODULE_EXCLUDE}
     "src/lux_script/modules/base_modules/pdf.cpp"
-    "src/lux_script/modules/base_modules/http.cpp")
+    "src/lux_script/modules/base_modules/http.cpp"
+    "src/lux_script/modules/base_modules/mail.cpp"
+    "src/lux_script/modules/base_modules/imap.cpp"
+    "src/lux_script/modules/base_modules/mailparse.cpp")
 foreach(_excluded ${_lux_module_exclude})
     list(REMOVE_ITEM LUX_MODULE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${_excluded})
 endforeach()
@@ -303,7 +306,10 @@ if(LUX_HTTP)
         pkg_check_modules(LUX_CURL QUIET libcurl)
     endif()
     if(LUX_CURL_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp
+                                          src/lux_script/modules/base_modules/mail.cpp
+                                          src/lux_script/modules/base_modules/imap.cpp
+                                          src/lux_script/modules/base_modules/mailparse.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_HTTP)
         target_include_directories(lux_script PRIVATE ${LUX_CURL_INCLUDE_DIRS})
         target_link_libraries(lux_script PRIVATE ${LUX_CURL_LIBRARIES})

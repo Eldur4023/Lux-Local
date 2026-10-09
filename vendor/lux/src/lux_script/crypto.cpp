@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstring>
 #include <sys/random.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 namespace lux_script::crypto {
 
@@ -234,7 +236,8 @@ std::string random_bytes(size_t n) {
         // free correctness). Available unconditionally: this project only
         // targets Linux, and getrandom() has existed since Linux 3.17
         // (2014)/glibc 2.25.
-        ssize_t r = ::getrandom(out.data() + got, n - got, 0);
+        // syscall, not ::getrandom(): bionic only declares it from API 28 (Android build targets 26).
+        ssize_t r = ::syscall(SYS_getrandom, out.data() + got, n - got, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
             return {};   // caller must treat empty as failure, never a fallback value

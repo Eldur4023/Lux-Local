@@ -7,6 +7,16 @@
 
 DesktopWindow::DesktopWindow(Options opts) {
     auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
+    if (opts.dark)
+        if (GtkSettings* settings = gtk_settings_get_default())
+            g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, nullptr);
+    // GDK puts WM_COMMAND on its X11 group-leader window, and KDE's ksmserver
+    // saves every window carrying it as a "legacy session" app and relaunches
+    // it at login -- outside the .desktop launcher (so a pinned taskbar icon
+    // never binds to that window) and racing any autostart launch.
+    if (GdkDisplay* display = gdk_display_get_default())
+        gdk_property_delete(gdk_display_get_default_group(display),
+                            gdk_atom_intern_static_string("WM_COMMAND"));
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);
@@ -38,7 +48,14 @@ DesktopWindow::DesktopWindow(Options opts) {
 }
 
 DesktopWindow::~DesktopWindow() {
-    if (handle_) webview_destroy(static_cast<webview_t>(handle_));
+    if (!handle_) return;
+    auto w = static_cast<webview_t>(handle_);
+    // webview's GTK engine destructor is `= default`: it never destroys the
+    // window, so a closed window stayed on screen (and its WebKit connections
+    // kept the server's 30 s drain waiting) until the process exited.
+    gtk_widget_destroy(GTK_WIDGET(webview_get_window(w)));
+    while (gtk_events_pending()) gtk_main_iteration();
+    webview_destroy(w);
 }
 
 void DesktopWindow::run(const std::string& url) {
@@ -94,9 +111,10 @@ void DesktopWindow::maximize() {
 void DesktopWindow::restore() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
-            auto* win = GTK_WINDOW(webview_get_window(w));
-            gtk_window_unmaximize(win);
-            gtk_window_deiconify(win);
+            // present(), not unmaximize()+deiconify(): this is "show the
+            // window" (second launch), and unmaximizing threw away a
+            // maximized window's size every time.
+            gtk_window_present(GTK_WINDOW(webview_get_window(w)));
         }, nullptr);
 }
 

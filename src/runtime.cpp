@@ -7,7 +7,7 @@
 // Window title/size come from app/app.lux's own `window:` block (see
 // vendor/lux/src/lux_script/modules/window.cpp), never from here or from
 // CMakeLists.txt: this file has nothing app-specific in it.
-#include "resources.hpp"
+#include "boot.hpp"
 #include "desktop_window.hpp"
 
 #include <lux_script/project.hpp>
@@ -24,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <thread>
@@ -115,47 +116,6 @@ void install_window_control_hooks() {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) g_window->clipboard_write(text);
     };
-}
-
-fs::path make_temp_dir(const std::string& prefix) {
-    std::string tmpl = (fs::temp_directory_path() / (prefix + "-XXXXXX")).string();
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-    if (!::mkdtemp(buf.data()))
-        throw std::runtime_error("mkdtemp: " + std::string(std::strerror(errno)));
-    return fs::path(buf.data());
-}
-
-void extract_resources(const fs::path& dir) {
-    for (const auto& f : kEmbeddedFiles) {
-        fs::path dest = dir / f.path;
-        fs::create_directories(dest.parent_path());
-        std::ofstream out(dest, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(f.data), static_cast<std::streamsize>(f.size));
-    }
-}
-
-// Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
-// it back with getsockname(), then releases it immediately. A small race
-// (something else could grab the same port before Lux's own bind) is the
-// same trade-off every "find a free port" helper makes; fine for a desktop
-// app that only ever talks to itself.
-uint16_t find_free_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = 0;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        throw std::runtime_error("bind: " + std::string(std::strerror(errno)));
-    }
-    socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-    uint16_t port = ntohs(addr.sin_port);
-    ::close(fd);
-    return port;
 }
 
 fs::path xdg_data_home() {
@@ -272,97 +232,37 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
     return 0;
 }
 
-bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd >= 0) {
-            sockaddr_in addr{};
-            addr.sin_family      = AF_INET;
-            addr.sin_port        = htons(port);
-            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
-            ::close(fd);
-            if (ok) return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return false;
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
     bool install = argc > 1 && std::string(argv[1]) == "--install-desktop";
 
-    fs::path work_dir = make_temp_dir("luxdesktop");
-    extract_resources(work_dir);
-    fs::current_path(work_dir); // the app's own paths (templates "./templates",
-                                 // static "/x" -> "./public") are written
-                                 // relative to itself, so this is the CWD
-                                 // they expect.
-
-    std::vector<fs::path> inputs;
-    std::string error;
-    if (!lux_script::resolve_inputs({"."}, inputs, error)) {
-        std::cerr << "luxdesktop: " << error << "\n";
+    // Resources are extracted to a PERSISTENT directory (XDG data home), not
+    // a temp one: anything the app writes next to its own sources at runtime
+    // -- today that is the SQLite database under ./data/ -- has to survive
+    // restarts. Re-extracting on every boot only overwrites the read-only
+    // resources themselves (app.lux, templates/, public/); ./data/ is never
+    // part of the embedded set (CMakeLists.txt excludes it from respack).
+#ifndef LUXDESKTOP_APP_ID
+#define LUXDESKTOP_APP_ID "app"
+#endif
+    fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;
+    std::unique_ptr<LuxServer> server;
+    try {
+        server = std::make_unique<LuxServer>(work_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "luxdesktop: " << e.what() << "\n";
         return 1;
     }
+    const auto& mod = server->module();
 
-    lux_script::DiagnosticBag diags;
-    auto mod = lux_script::compile(inputs, diags);
-    if (!diags.empty()) {
-        std::cerr << lux_script::format_errors(diags, mod->files);
-        return 1;
-    }
-
-    if (install) {
-        int rc = install_desktop(mod, work_dir);
-        std::error_code ec;
-        fs::remove_all(work_dir, ec);
-        return rc;
-    }
-
-    lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    auto dispatch = [mod](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto match = mod->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([mod](int code, lux::Request& req, lux::Response& res) {
-        auto it = mod->error_handlers.find(code);
-        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
-        if (it == mod->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &mod->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
-
-    uint16_t port = find_free_port();
+    if (install) return install_desktop(mod, work_dir);
 
     // Force-closes the window if a signal (CTRL+C from a terminal, a
     // desktop "quit" action, systemd stop...) starts the shutdown before
     // the user closes the window by hand -- otherwise the server drains but
     // the window stays open with nothing behind it.
-    app.on_before_stop([] {
+    server->app().on_before_stop([] {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
@@ -370,9 +270,7 @@ int main(int argc, char** argv) {
         }
     });
 
-    std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
-    if (!wait_for_server(port, std::chrono::milliseconds(5000)))
-        lux::log().warn("server did not come up in time, opening the window anyway");
+    uint16_t port = server->start();
 
     const lux_script::WindowConfig& wcfg = lux_script::window_config();
     std::string app_id = sanitize_id(resolve_display_name(mod));
@@ -383,32 +281,37 @@ int main(int argc, char** argv) {
     opts.height    = wcfg.height;
     opts.resizable = wcfg.resizable;
     opts.devtools  = wcfg.devtools;
+    opts.dark      = wcfg.dark;
     opts.icon      = wcfg.icon;
     // A size the user already resized to on a previous run wins over the
     // window: block's own defaults -- those are a first-launch default,
     // not something to snap back to every time.
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    DesktopWindow window(opts);
+    std::optional<DesktopWindow> window(std::in_place, opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &window;
+        g_window = &*window;
     }
     install_window_control_hooks();
-    window.run("http://127.0.0.1:" + std::to_string(port) + "/");
-    save_geometry(app_id, window.last_width(), window.last_height());
+    window->run("http://127.0.0.1:" + std::to_string(port) + "/");
+    save_geometry(app_id, window->last_width(), window->last_height());
 
-    // See the comment on g_shutdown_from_signal: only raise SIGTERM
-    // ourselves if nothing already started the shutdown.
-    if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
-    server_thread.join();
-
+    // Destroy the window before waiting on the server: the webview keeps its
+    // keep-alive connections open, and the server's drain waits up to 30 s
+    // for them -- the closed window stayed on screen all that time (and a
+    // restart after an update opened the new window beside the old one).
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         g_window = nullptr;
     }
+    window.reset();
 
-    std::error_code ec;
-    fs::remove_all(work_dir, ec);
+    // See the comment on g_shutdown_from_signal: only raise SIGTERM
+    // ourselves if nothing already started the shutdown.
+    if (g_shutdown_from_signal.load()) server->join(); else server->stop();
+
+    // work_dir is PERSISTENT (XDG data home) and holds ./data/ with the
+    // library database: never delete it on shutdown.
     return 0;
 }

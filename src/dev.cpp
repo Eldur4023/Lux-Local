@@ -395,28 +395,31 @@ int main() {
     opts.height    = wcfg.height;
     opts.resizable = wcfg.resizable;
     opts.devtools  = true; // dev mode: always on, no reason to hide it here
+    opts.dark      = wcfg.dark;
     opts.icon      = wcfg.icon;
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    DesktopWindow window(opts);
+    std::optional<DesktopWindow> window(std::in_place, opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &window;
+        g_window = &*window;
     }
     install_window_control_hooks();
     lux::log().info("lux desktop (dev): watching " + fs::path(LUXDESKTOP_APP_DIR).string());
-    window.run("http://127.0.0.1:" + std::to_string(port) + "/");
-    save_geometry(app_id, window.last_width(), window.last_height());
+    window->run("http://127.0.0.1:" + std::to_string(port) + "/");
+    save_geometry(app_id, window->last_width(), window->last_height());
+
+    // La ventana se destruye antes de esperar al servidor (ver runtime.cpp).
+    {
+        std::lock_guard<std::mutex> lk(g_window_mutex);
+        g_window = nullptr;
+    }
+    window.reset();
 
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
     server_thread.join();
 
     g_stop.store(true);
     watcher.join();
-
-    {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = nullptr;
-    }
     return 0;
 }

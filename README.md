@@ -224,3 +224,58 @@ never goes down over a typo. Devtools are always on in this mode.
 - **Linux only**, same as Lux itself (epoll, `sendfile(2)`, `SO_REUSEPORT`).
 - The menu has no radio-button groups yet (nested submenus, keyboard
   accelerators and checkboxes all work).
+
+## Android
+
+The window shell is the only GTK-specific part: `src/boot.cpp` (extract, compile, serve on loopback) is
+platform-independent, and `src/android.cpp` exposes it over JNI as `libluxlocal.so` with no GTK/WebKit.
+The Kotlin side hosts a `WebView` and loads the port returned by `LuxLocal.start(filesDir)`:
+
+```kotlin
+package dev.lux.local
+object LuxLocal { init { System.loadLibrary("luxlocal") }
+                  external fun start(dataDir: String): Int   // port, -1 on failure
+                  external fun stop() }
+// webView.loadUrl("http://127.0.0.1:${LuxLocal.start(filesDir.path)}/")
+```
+
+Build (NDK r26+, API 28 minimum -- bionic has `posix_spawn` from 28; respack runs on the host):
+
+    cmake -S . -B build && cmake --build build --target respack
+    cmake -S . -B build-android -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DLUX_HOST_RESPACK=$PWD/build/respack \
+          -DLUX_POSTGRES=OFF -DLUX_MYSQL=OFF -DLUX_PDF=OFF -DLUX_HTTP=OFF -DLUX_JEMALLOC=OFF
+    cmake --build build-android --target luxlocal
+
+With `http`/`mail`/`imap` (static OpenSSL + libcurl, cross-built by `tools/android-deps.sh`) and SQLite (vendored in
+`third_party/sqlite`, FTS5 on; used automatically on Android):
+
+    ANDROID_NDK=$ANDROID_NDK tools/android-deps.sh arm64-v8a      # -> build-android-deps/arm64-v8a
+    D=$PWD/build-android-deps/arm64-v8a
+    PKG_CONFIG_LIBDIR=$D/lib/pkgconfig cmake -S . -B build-android ... -DLUX_PDF=OFF \
+          -DCMAKE_SHARED_LINKER_FLAGS="-L$D/lib"
+
+TLS trusts Android's system CA directory (`/system/etc/security/cacerts`).
+
+Gradle project in `android/` (a plain `Activity` + `WebView` + `LuxLocal.kt`); `tools/android-build.sh` builds the
+`.so` for each ABI into `android/app/src/main/jniLibs/`, then:
+
+    ANDROID_NDK=... tools/android-build.sh arm64-v8a x86_64
+    cd android && gradle assembleDebug          # JDK 17, Gradle 8.7, SDK 34 (sdk.dir in local.properties)
+
+Checked on an x86_64 emulator (Android 14): the demo app boots, serves over loopback and the +1 button round-trips
+to the Lux server. Not tested on a real arm64 device.
+
+Mail modules (`imap`, `mail`, `mailparse`, `keyring`) are vendored too. `keyring` keeps `secret-tool` on desktop and, on
+Android, uses `lux_script::keyring_control()` hooks that `src/android.cpp` points at `LuxLocal.secretGet/Set/Delete`
+(AES-GCM key in the Android Keystore, ciphertext in private SharedPreferences). Checked on the emulator: keyring
+round-trip, and `imap.uids`/`imap.fetch` against a fake IMAP server. `tools/android-deps.sh` pins curl 8.18.0:
+8.19.0-8.22.0 return an empty body for custom IMAP commands (`UID FETCH ...`).
+
+`window.notify` is wired to a system notification, and `SyncService` (foreground service) keeps the process and the Lux server
+alive with the app closed and polls `POST /api/sync` every 3 minutes -- that route is the app's own business (Mail's notifies new
+mail through `window.notify`); a Lux Desktop app without one simply gets a failed request each time. A Mail-specific CA fix lives in
+`src/android.cpp` (system CAs -> `SSL_CERT_FILE`, picked up by the `http`/`mail`/`imap` modules through `lux_curl_init()`).
+
+Not done yet: the other `window` hooks (file picker, tray, menu, clipboard) are unset on Android; the debug APK is large (~170 MB,
+unstripped `.so` for two ABIs).

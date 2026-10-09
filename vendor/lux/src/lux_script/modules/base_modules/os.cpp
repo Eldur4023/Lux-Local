@@ -131,8 +131,13 @@ Value fn_os_mtime_ms(NativeCtx&, std::vector<Value>& args, std::string& error) {
     // system_clock is the standard, portable way to get a real Unix
     // timestamp out of it, not the file_clock::to_sys() shim some libstdc++
     // versions add ad hoc.
+#ifdef __ANDROID__
+    // libc++ (NDK) has no clock_cast; its file_clock counts from the Unix epoch on Linux/Android.
+    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(ftime.time_since_epoch());
+#else
     auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
     auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(sys.time_since_epoch());
+#endif
     return Value::integer(static_cast<long long>(ms.count()));
 }
 
