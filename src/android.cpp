@@ -75,6 +75,12 @@ void use_system_cas(const std::filesystem::path& dir) {
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path bundle = dir / "cacerts.pem";
+    // Rebuild only when missing or older than the system store (an OTA updates the directory's mtime).
+    const fs::path sys = "/system/etc/security/cacerts";
+    if (fs::exists(bundle, ec) && fs::last_write_time(bundle, ec) > fs::last_write_time(sys, ec)) {
+        setenv("SSL_CERT_FILE", bundle.c_str(), 1);
+        return;
+    }
     std::ofstream out(bundle, std::ios::binary | std::ios::trunc);
     for (const auto& e : fs::directory_iterator("/system/etc/security/cacerts", ec)) {
         std::ifstream in(e.path());

@@ -19,6 +19,7 @@
 #include <memory>
 #include <filesystem>
 #include <thread>
+#include <cstdlib>
 #include <charconv>
 #include <chrono>
 #include <algorithm>
@@ -545,6 +546,11 @@ void App::run(const std::string& host, uint16_t port) {
             num_threads = static_cast<unsigned>(CPU_COUNT(&mask));
     }
     if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
+    // LUX_THREADS=N: fixed size for the event loops and both pools (a desktop shell does not need one per core).
+    if (const char* e = std::getenv("LUX_THREADS"); e && *e) {
+        long n = std::strtol(e, nullptr, 10);
+        if (n > 0 && n <= 1024) num_threads = static_cast<unsigned>(n);
+    }
     num_threads = std::max(1u, num_threads);
 
     // Shared pool for route handlers with no `await` at all: pure CPU-bound

@@ -8,6 +8,8 @@
 // entry per file, path kept relative to <source-dir> so runtime.cpp can
 // recreate the exact same layout under a temp directory at startup.
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -101,6 +103,19 @@ int main(int argc, char** argv) {
         out << "\n};\n\n";
     }
 
+    // FNV-1a 64 over (path, bytes) of every file, in the deterministic sorted order.
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](const std::string& b) { for (unsigned char c : b) { h ^= c; h *= 1099511628211ULL; } h ^= 0xff; h *= 1099511628211ULL; };
+    for (size_t i = 0; i < files.size(); ++i) {
+        std::ifstream in(files[i], std::ios::binary);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        mix(rel_paths[i]);
+        mix(ss.str());
+    }
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+    out << "const char* const kEmbeddedStamp = \"" << hex << "\";\n\n";
     out << "const std::vector<EmbeddedFile> kEmbeddedFiles = {\n";
     for (size_t i = 0; i < files.size(); ++i) {
         std::string ident = "kFile_" + std::to_string(i) + "_" + sanitize_ident(rel_paths[i]);

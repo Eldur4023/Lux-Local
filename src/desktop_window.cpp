@@ -20,6 +20,13 @@ DesktopWindow::DesktopWindow(Options opts) {
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);
+    // No white flash before the first paint: paint the view with the theme colour; and a single-page local
+    // app needs no big HTTP cache (DOCUMENT_VIEWER keeps WebKit's memory/disk cache small).
+    if (GtkWidget* view = gtk_bin_get_child(GTK_BIN(webview_get_window(w)))) {
+        GdkRGBA bg = opts.dark ? GdkRGBA{0.106, 0.106, 0.122, 1.0} : GdkRGBA{1.0, 1.0, 1.0, 1.0};
+        webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(view), &bg);
+    }
+    webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
     if (!opts.icon.empty()) {
         // Safe to call directly (not through webview_dispatch): the GTK
         // main loop has not started yet at this point in construction, and
@@ -69,15 +76,6 @@ void DesktopWindow::run(const std::string& url) {
 
 void DesktopWindow::terminate() {
     if (running_.exchange(false)) webview_terminate(static_cast<webview_t>(handle_));
-}
-
-void DesktopWindow::reload() {
-    // webview_dispatch marshals the call onto the window's own thread --
-    // reload() is meant to be called from the file-watcher thread, which is
-    // never the thread run() is blocking on.
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void*) { webview_eval(w, "location.reload()"); },
-        nullptr);
 }
 
 void DesktopWindow::set_title(const std::string& title) {

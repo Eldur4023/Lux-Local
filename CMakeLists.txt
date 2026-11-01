@@ -8,6 +8,25 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# ── Size ──────────────────────────────────────────────────────────────────
+# Release: -Os, one section per function/datum and linker gc + strip (4.3 MB -> ~1.6 MB on x86). The
+# LUX_REGISTER_MODULE static initialisers sit in .init_array, which gc-sections treats as roots, so every
+# module still registers. Turn off for debugging: -DLUX_DESKTOP_SMALL=OFF. LTO is opt-in: -DLUX_DESKTOP_LTO=ON.
+option(LUX_DESKTOP_SMALL "Release: -Os + gc-sections + strip" ON)
+option(LUX_DESKTOP_LTO   "Release: link-time optimisation"    OFF)
+if(LUX_DESKTOP_SMALL AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS_RELEASE "-Os -DNDEBUG -ffunction-sections -fdata-sections")
+    set(CMAKE_C_FLAGS_RELEASE   "-Os -DNDEBUG -ffunction-sections -fdata-sections")
+    if(NOT ANDROID) # the Android .so already links with --strip-all, see below
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--as-needed -s")
+    else()
+        set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+    endif()
+endif()
+if(LUX_DESKTOP_LTO)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
 # ── Lux, vendored as plain source (vendor/lux, copied in as-is, not a git
 # submodule: no network dependency to build this project once cloned) ───────
 # Built exactly as Lux itself builds it -- nothing here patches its
@@ -25,7 +44,48 @@ if(ANDROID)
     set(SQLITE3_LIB sqlite3_vendored CACHE STRING "" FORCE)
 endif()
 
-add_subdirectory(vendor/lux)
+# Heavy optional modules (db drivers, pdf/cairo, image, curl/mail, crypto, gzip) are linked only when some .lux
+# of the app imports them: `import X` is scanned at configure time. Keep everything: -DLUX_DESKTOP_ALL_MODULES=ON.
+# (sqlite stays on: cheap, and `state` may use it.) Set as plain variables so Lux's option() calls honour them.
+option(LUX_DESKTOP_ALL_MODULES "Link every Lux module, whatever the app imports" OFF)
+function(lux_desktop_select_modules dir)
+    file(GLOB_RECURSE _lux_srcs CONFIGURE_DEPENDS ${dir}/*.lux)
+    set(_imports "")
+    foreach(_f ${_lux_srcs})
+        file(STRINGS ${_f} _lines REGEX "^[ \t]*import[ \t]+[A-Za-z_]+")
+        foreach(_l ${_lines})
+            string(REGEX REPLACE "^[ \t]*import[ \t]+([A-Za-z_]+).*" "\\1" _m "${_l}")
+            list(APPEND _imports ${_m})
+        endforeach()
+    endforeach()
+    message(STATUS "luxdesktop: app imports: ${_imports}")
+    # <LUX_OPTION> <imports that need it...>; one libcurl group for http/mail/imap/mailparse (sqlite
+    # replication also uses it); zip needs zlib.
+    set(_map "LUX_MYSQL:mysql" "LUX_POSTGRES:postgres" "LUX_PDF:pdf" "LUX_IMAGE:image" "LUX_CRYPTO:crypto"
+             "LUX_GZIP:gzip,zip" "LUX_HTTP:http,mail,imap,mailparse")
+    foreach(_e ${_map})
+        string(REPLACE ":" ";" _p "${_e}")
+        list(GET _p 0 _opt)
+        list(GET _p 1 _mods)
+        string(REPLACE "," ";" _mods "${_mods}")
+        set(_need OFF)
+        foreach(_m ${_mods})
+            if(_m IN_LIST _imports)
+                set(_need ON)
+            endif()
+        endforeach()
+        if(NOT _need)
+            set(${_opt} OFF PARENT_SCOPE)
+        endif()
+    endforeach()
+endfunction()
+if(NOT LUX_DESKTOP_ALL_MODULES)
+    lux_desktop_select_modules(${CMAKE_CURRENT_SOURCE_DIR}/app)
+endif()
+
+# EXCLUDE_FROM_ALL: Lux's tests/tools are not built by default; the targets the shell links (lux, lux_script)
+# still build as dependencies of `app`. For a headless server to test with: --target lux-bin.
+add_subdirectory(vendor/lux EXCLUDE_FROM_ALL)
 
 # Android's NDK libc++ has no C++20 time zone database (lux_script/tz.hpp): Howard Hinnant's date/tz library
 # stands in for the `time` module. An app that needs zones ships the IANA text files (set_install, see src/android.cpp).

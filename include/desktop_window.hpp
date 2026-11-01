@@ -39,13 +39,8 @@ public:
     // Thread-safe: makes run() return, as if the user had closed the window.
     void terminate();
 
-    // Thread-safe: reloads the current page. Used by dev mode's file
-    // watcher (src/dev.cpp) so a hot LuxScript recompile refreshes the
-    // window the same way it would a browser tab, no manual F5.
-    void reload();
-
     // The rest back the `window` LuxScript module (vendor/lux/src/lux_script/
-    // modules/window.cpp) via WindowControl -- see runtime.cpp/dev.cpp for
+    // modules/window.cpp) via WindowControl -- see runtime.cpp for
     // how the hooks get wired up. All thread-safe: a route handler calling
     // these runs on an event-loop or blocking_pool thread, never the
     // window's own.
@@ -95,7 +90,7 @@ public:
     // "configure-event" handler connected at construction time rather than
     // queried on demand, because by the time run() returns the GTK window
     // may already be torn down (its own "destroy" signal is what stops the
-    // loop run() is blocking on). The caller (runtime.cpp/dev.cpp) reads
+    // loop run() is blocking on). The caller (runtime.cpp) reads
     // these right after run() returns to persist the size for next launch.
     int last_width()  const { return last_width_.load();  }
     int last_height() const { return last_height_.load(); }

@@ -1,5 +1,5 @@
 #include "boot.hpp"
-#include "resources.hpp"
+#include "extract.hpp"
 
 #include <lux_script/project.hpp>
 
@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <netinet/in.h>
@@ -20,15 +21,6 @@ int lux_main(int argc, char** argv);   // vendor/lux main.cpp, compiled with LUX
 namespace fs = std::filesystem;
 
 namespace {
-
-void extract_resources(const fs::path& dir) {
-    for (const auto& f : kEmbeddedFiles) {
-        fs::path dest = dir / f.path;
-        fs::create_directories(dest.parent_path());
-        std::ofstream out(dest, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(f.data), static_cast<std::streamsize>(f.size));
-    }
-}
 
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads it back, releases it.
 uint16_t find_free_port() {
@@ -90,12 +82,13 @@ int LuxServer::start() {
     static char arg0[] = "lux", arg1[] = "--no-watch", arg2[] = "--port", arg4[] = ".";
     static char* lux_argv[] = {arg0, arg1, arg2, port_arg.data(), arg4, nullptr};
     exited_ = false;
+    ::setenv("LUX_THREADS", "2", 0);   // a phone needs no loop per core (override: LUX_THREADS)
     thread_ = std::thread([this] { lux_main(5, lux_argv); exited_ = true; });
     // A cold start compiles the whole app and opens SQLite: allow it a while on a phone.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline && !exited_) {
         if (port_open(port)) return port;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return -1;
 }

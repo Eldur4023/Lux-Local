@@ -15,3 +15,7 @@ struct EmbeddedFile {
 // Defined by the generated <app>_resources.cpp (one per app, see
 // add_lux_desktop_app() in CMakeLists.txt) -- never hand-written.
 extern const std::vector<EmbeddedFile> kEmbeddedFiles;
+
+// Content hash of every embedded file (path + bytes), also emitted by respack: extraction is skipped when the
+// work dir's .respack-stamp already holds it.
+extern const char* const kEmbeddedStamp;
