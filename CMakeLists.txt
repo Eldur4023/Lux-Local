@@ -111,7 +111,7 @@ function(_lux_desktop_link name)
             return()
         endif()
         # MinGW / clang-mingw (GNU ld style): the same --whole-archive trick as Linux, below.
-        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++)  # no MinGW runtime DLLs to ship
+        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)  # no MinGW runtime DLLs to ship; ld flags duplicate inline-thread_local TLS init under --whole-archive
         target_link_libraries(${name} PRIVATE ${_lux_win_libs})
     else()
     target_link_directories(${name} PRIVATE

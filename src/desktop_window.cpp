@@ -5,7 +5,7 @@
 #include <gio/gio.h>
 #else
 #include <windows.h>
-#include <commctl.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
 #include <fstream>
