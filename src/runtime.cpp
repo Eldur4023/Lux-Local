@@ -7,7 +7,7 @@
 // Window title/size come from app/app.lux's own `window:` block (see
 // vendor/lux/src/lux_script/modules/window.cpp), never from here or from
 // CMakeLists.txt: this file has nothing app-specific in it.
-#include "resources.hpp"
+#include "extract.hpp"
 #include "desktop_window.hpp"
 
 #include <lux_script/project.hpp>
@@ -153,15 +153,6 @@ void install_window_control_hooks() {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) g_window->clipboard_write(text);
     };
-}
-
-void extract_resources(const fs::path& dir) {
-    for (const auto& f : kEmbeddedFiles) {
-        fs::path dest = dir / u8path(f.path);
-        fs::create_directories(dest.parent_path());
-        std::ofstream out(dest, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(f.data), static_cast<std::streamsize>(f.size));
-    }
 }
 
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
@@ -338,7 +329,7 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
             sock_close(fd);
             if (ok) return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return false;
 }
@@ -419,6 +410,12 @@ int main(int argc, char** argv) {
     char* lux_argv[] = {arg0, arg1, arg2, port_arg.data(), arg4, nullptr};
 
     // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
+    // A desktop shell has no use for one event loop + worker per core: 2 threads each (override: LUX_THREADS).
+#ifdef _WIN32
+    if (!std::getenv("LUX_THREADS")) _putenv("LUX_THREADS=2");
+#else
+    ::setenv("LUX_THREADS", "2", 0);
+#endif
     std::thread server_thread([&lux_argv] {
         lux_main(5, lux_argv);
         std::lock_guard<std::mutex> lk(g_window_mutex);

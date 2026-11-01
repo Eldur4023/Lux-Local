@@ -15,26 +15,28 @@ import java.net.URL
  * Background sync with no foreground service, so no permanent notification: a chain of wake-up alarms.
  * Each alarm starts the Lux server if the process was gone, calls POST /api/sync, and schedules the next
  * one. New mail is announced by the Lux side through window.notify -> LuxLocal.notify.
- * IMAP has no push here (libcurl has no IDLE), so this is polling. With the "Alarms & reminders" special
- * access the alarm is exact; without it Android may stretch the minute, and in deep Doze it fires at most
- * every ~9 minutes. (JobScheduler was tried first: its delay timer does not wake the device.)
+ * IMAP has no push here (libcurl has no IDLE), so this is polling. The alarm is inexact (~15 min, Doze may stretch it); apps opt in with `background_sync`.
+ * (JobScheduler was tried first: its delay timer does not wake the device.)
  */
 object Sync {
-    private const val EVERY_MS = 2 * 60_000L   // the desktop app polls every 3 minutes
+    private const val EVERY_MS = 15 * 60_000L   // inexact: a 2-minute wake-up chain drains the battery; apps that need it opt in below
 
     private fun intent(c: Context, flags: Int): PendingIntent? =
         PendingIntent.getBroadcast(c, 0, Intent(c, SyncReceiver::class.java), flags or PendingIntent.FLAG_IMMUTABLE)
 
+    // Opt-in per app: res/values/config.xml `background_sync` (default false, like needs_all_files).
+    private fun enabled(c: Context) = c.resources.getBoolean(R.bool.background_sync)
+
     fun schedule(c: Context) = runCatching {
+        if (!enabled(c)) return@runCatching
         val am = c.getSystemService(AlarmManager::class.java)
         val at = System.currentTimeMillis() + EVERY_MS
         val pi = intent(c, PendingIntent.FLAG_UPDATE_CURRENT)!!
-        if (Build.VERSION.SDK_INT >= 31 && am.canScheduleExactAlarms()) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
-        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
     }.onFailure { Log.w("luxlocal", "cannot schedule sync: $it") }
 
     // On app start and after boot/update: only if no alarm is pending (a pending PendingIntent is our marker).
-    fun ensureScheduled(c: Context) { if (intent(c, PendingIntent.FLAG_NO_CREATE) == null) schedule(c) }
+    fun ensureScheduled(c: Context) { if (enabled(c) && intent(c, PendingIntent.FLAG_NO_CREATE) == null) schedule(c) }
 
     // Runs on the calling thread: start the server (idempotent) and ask it to sync.
     fun syncNow(c: Context) {
