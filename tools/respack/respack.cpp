@@ -8,6 +8,7 @@
 // entry per file, path kept relative to <source-dir> so runtime.cpp can
 // recreate the exact same layout under a temp directory at startup.
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -89,7 +90,9 @@ int main(int argc, char** argv) {
         ss << in.rdbuf();
         std::string bytes = ss.str();
 
-        std::string rel = fs::relative(files[i], src).generic_string();
+        // '/'-separated and UTF-8 on every platform (generic_string() would be the ANSI code page on Windows).
+        auto rel8 = fs::relative(files[i], src).generic_u8string();
+        std::string rel(rel8.begin(), rel8.end());
         rel_paths.push_back(rel);
         std::string ident = "kFile_" + std::to_string(i) + "_" + sanitize_ident(rel);
 

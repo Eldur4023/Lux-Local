@@ -53,6 +53,24 @@ if(ANDROID)
     endif()
     add_executable(respack IMPORTED)
     set_target_properties(respack PROPERTIES IMPORTED_LOCATION ${LUX_HOST_RESPACK})
+elseif(WIN32)
+    # Windows: webview.h's WEBVIEW_EDGE backend (WebView2, needs the Evergreen runtime on the user's machine --
+    # preinstalled on Windows 11 and updated Windows 10). Its built-in WebView2Loader implementation means only
+    # the WebView2 *header* is needed: vendor it from the NuGet package Microsoft.Web.WebView2
+    # (build/native/include/WebView2.h; unzip the .nupkg) into third_party/webview2/, or pass
+    # -DLUX_WEBVIEW2_INCLUDE_DIR=<dir containing WebView2.h>. No WebView2Loader.dll / .lib is needed.
+    find_path(LUX_WEBVIEW2_INCLUDE_DIR WebView2.h
+        PATHS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2
+              ${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2/include
+        NO_DEFAULT_PATH)
+    if(NOT LUX_WEBVIEW2_INCLUDE_DIR)
+        message(FATAL_ERROR "WebView2.h not found. Download the NuGet package Microsoft.Web.WebView2 "
+            "(https://www.nuget.org/packages/Microsoft.Web.WebView2, a .nupkg is a zip), copy "
+            "build/native/include/WebView2.h to third_party/webview2/WebView2.h, or pass "
+            "-DLUX_WEBVIEW2_INCLUDE_DIR=<dir containing WebView2.h>.")
+    endif()
+    # Default: GUI subsystem (no console window). -DLUX_WIN_CONSOLE=ON keeps a console (app-dev / debugging).
+    option(LUX_WIN_CONSOLE "Windows: build the app with a console (stdout/stderr visible)" OFF)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LUX_GTK REQUIRED gtk+-3.0)
@@ -60,6 +78,8 @@ else()
     if(NOT LUX_WEBKIT_FOUND)
         pkg_check_modules(LUX_WEBKIT REQUIRED webkit2gtk-4.0)
     endif()
+endif()
+if(NOT ANDROID)
     # ── respack: embeds an app's source directory into a generated .cpp ───
     add_executable(respack tools/respack/respack.cpp)
     target_include_directories(respack PRIVATE include)
@@ -72,8 +92,31 @@ function(_lux_desktop_link name)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
         ${LUX_GTK_INCLUDE_DIRS} ${LUX_WEBKIT_INCLUDE_DIRS})
+    if(WIN32)
+        target_include_directories(${name} PRIVATE ${LUX_WEBVIEW2_INCLUDE_DIR})
+        # shell32/shlwapi/ole32/oleaut32/version/advapi32: webview.h (WebView2 host); user32/gdi32: window +
+        # icons; comdlg32: file dialogs; comctl32: window subclass; dwmapi: dark title bar; ws2_32: sockets.
+        set(_lux_win_libs ole32 oleaut32 shlwapi shell32 version advapi32 user32 gdi32 comdlg32 comctl32 dwmapi ws2_32)
+        target_compile_definitions(${name} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+        if(LUX_WIN_CONSOLE)
+            target_compile_definitions(${name} PRIVATE LUXDESKTOP_CONSOLE)
+        else()
+            set_target_properties(${name} PROPERTIES WIN32_EXECUTABLE ON)
+        endif()
+        if(MSVC)
+            # MSVC link.exe has no --whole-archive: /WHOLEARCHIVE:lux_script keeps every module's
+            # LUX_REGISTER_MODULE object (needs CMake >= 3.24 for the $<LINK_LIBRARY:WHOLE_ARCHIVE,...> form).
+            target_link_libraries(${name} PRIVATE
+                "$<LINK_LIBRARY:WHOLE_ARCHIVE,lux_script>" lux Threads::Threads ${_lux_win_libs})
+            return()
+        endif()
+        # MinGW / clang-mingw (GNU ld style): the same --whole-archive trick as Linux, below.
+        target_link_options(${name} PRIVATE -static-libgcc -static-libstdc++)  # no MinGW runtime DLLs to ship
+        target_link_libraries(${name} PRIVATE ${_lux_win_libs})
+    else()
     target_link_directories(${name} PRIVATE
         ${LUX_GTK_LIBRARY_DIRS} ${LUX_WEBKIT_LIBRARY_DIRS})
+    endif()
     # --whole-archive: liblux_script.a is linked member-by-member, and a
     # module .cpp with nothing else in this binary referencing it (true of
     # sqlite/hash/regex/... whenever the app doesn't happen to call
