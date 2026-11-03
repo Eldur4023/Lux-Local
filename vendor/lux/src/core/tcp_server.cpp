@@ -1,5 +1,6 @@
 #include "tcp_server.hpp"
 #include "../http/http_connection.hpp"
+#include <algorithm>
 
 #include <lux/platform.hpp>
 #include <stdexcept>
