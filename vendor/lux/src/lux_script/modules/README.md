@@ -5,9 +5,9 @@ There is no central list to edit anymore — see NATIVE-MODULES.md §5 for the f
 of why, and `include/lux_script/builtin_module.hpp`'s comment on `LUX_REGISTER_MODULE`
 for the mechanism.
 
-- **`base_modules/`** — the officially shipped modules (`hash`, `csv`, `os`, `math`,
-  `time`, `regex`, `pdf`, `http`). Treat it as upstream code: changes here are project
-  changes, not app-specific ones.
+- **`base_modules/`** — the officially shipped modules (`hash`, `encoding`, `text`, `math`,
+  `time`, `regex`, `json`, `csv`, `os`, `proc`, `rooms`, `net`, `zip`, `pdf`, `http`). Treat it
+  as upstream code: changes here are project changes, not app-specific ones.
 - **This folder itself** — drop your own `.cpp` here (a sibling of `base_modules/`, not
   inside it) to add a module of your own. CMake picks up any `.cpp` file placed directly
   in either location and compiles it into the build automatically, the next time you
@@ -26,36 +26,38 @@ namespace lux_script {
 namespace {
 
 Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "qrcode.generate() expects a string"; return Value::null(); }
+    if (args[0].as_str().empty()) { error = "qrcode.generate(): nothing to encode"; return Value::null(); }
     return Value::str(/* ... */);
 }
 
-class QrcodeModule : public BuiltinModule {
-public:
-    const char* name() const override { return "qrcode"; }
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"generate", 1, 1, fn_qrcode_generate},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(QrcodeModule)
+LUX_MODULE(qrcode, {
+    {"generate", "s|i", fn_qrcode_generate},
+})
 
 } // namespace lux_script
 ```
 
-That last line is the entire "registration" step — no edit to `builtin_module.cpp`, no
-`slots_[...]` entry, nothing else in the project needs to change. `name()` is what
-`import` resolves against; there is no second name to keep in sync with it, because
-`LUX_REGISTER_MODULE` reads it back off the class itself at startup.
+`LUX_MODULE` is the whole registration: the name is what `import` resolves against, and
+nothing else in the project changes.
 
-Name the file after the module (`qrcode.cpp`, not `module_qrcode.cpp`) — the folder
-already says "this is a module", so the prefix used to exist elsewhere in the project is
-redundant here.
+The string after the function name is its **signature**, checked before the function runs, so
+the body can use `as_str()`/`as_int()` without checking: `s` string, `i` int, `n` int or
+float, `b` bool, `l` List, `d` Dict, `f` function, `x` anything; an uppercase letter also
+accepts `null`; what follows `|` is optional; a trailing `*` takes any number of further
+arguments; `>` then one letter declares what it returns (`s` `i` `b` `l` `d`, `r` float;
+nothing, or anything else, is `Json`) — the compiler checks a call site's use of it, so leave it
+out for a function that can return `null`. The argument count the compiler checks comes from
+it too: `{"hmac_sha256", "ss>s", fn}`. Set `error` to fail the
+call (a catchable Lux Script error, or `{"error": ...}` for an async function), and pass
+`/*is_async=*/true` as a fourth field for anything that waits on disk, the network, a child
+process or real CPU work, so it runs on the I/O pool and has to be `await`ed.
+
+A module that needs an `app:` block writes its own `BuiltinModule` subclass, overriding
+`configure()`, and registers it with `LUX_REGISTER_MODULE(ClassName)`.
+
+Name the file after the module (`qrcode.cpp`).
 
 ## If the module needs a third-party library
 
@@ -81,3 +83,12 @@ Pass `-DLUX_MODULE_EXCLUDE="path/to/file.cpp;other.cpp"` to `cmake` (paths relat
 the repo root), or set `LUX_MODULE_EXCLUDE` before the glob in a local, uncommitted
 `CMakeLists.txt` override. Anything listed there is skipped even though it lives under
 `modules/`.
+
+## Windows
+
+Anything OS-specific goes behind `#ifdef _WIN32`; `include/lux_script/platform_os.hpp` has the shared
+helpers (UTF-8 <-> UTF-16 paths, `get_env`, `home_dir`, time functions, `strptime`, `fnmatch_period`),
+and `base_modules/spawn.hpp` the portable process/pipe layer used by `os.run` and `proc.*`
+(CreateProcessW there, no shell either way). Differences a script can see: `proc.kill` terminates
+whatever the signal number, `os.chmod` only toggles the read-only attribute, `keyring` is the Credential
+Manager, `--native` is unavailable (the VM runs instead), `sqlite` `replicate` / `lux restore` are not ported.

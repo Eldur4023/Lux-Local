@@ -563,7 +563,11 @@ public:
   virtual ~gtk_webkit_engine() = default;
   void *window() { return (void *)m_window; }
   void run() { gtk_main(); }
-  void terminate() { gtk_main_quit(); }
+  // Local patch: the "destroy" handler can fire when no gtk_main() is running (Gtk-CRITICAL otherwise).
+  void terminate() {
+    if (gtk_main_level() > 0)
+      gtk_main_quit();
+  }
   void dispatch(std::function<void()> f) {
     g_idle_add_full(G_PRIORITY_HIGH_IDLE, (GSourceFunc)([](void *f) -> int {
                       (*static_cast<dispatch_fn_t *>(f))();

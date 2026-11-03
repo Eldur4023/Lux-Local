@@ -19,6 +19,8 @@ import math
 
 app:
     name      "Localify"
+    # Only this machine: the desktop runtime refuses to start otherwise.
+    host      "127.0.0.1"
     templates "./templates"
     static    "/static" -> "./public"
 
@@ -35,3 +37,8 @@ app:
 
 get endpoint("/"):
     return render("index.html")
+
+# Called every few minutes by the Android shell's background alarm (android/.../Sync.kt); the app's
+# periodic work goes here.
+post endpoint("/api/sync"):
+    return { "ok": true }

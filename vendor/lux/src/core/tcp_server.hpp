@@ -3,15 +3,29 @@
 #include <cstdint>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 #include <lux/core/event_loop.hpp>
 #include "../../include/lux/types.hpp"
+
+namespace lux::http { class HttpConnection; }
 
 namespace lux::core {
 
 class TcpServer {
 public:
+    // Every thread's server, so an accept can go to whichever holds the
+    // fewest connections: SO_REUSEPORT hashes them, and 50 keep-alive
+    // connections over 8 threads came out 11/9/6/6/5/5/5/3 -- the 11's
+    // requests waited twice as long, which was the whole p99.
+    struct Group { std::mutex m; std::vector<TcpServer*> servers; };
+
     // max_connections: maximum simultaneous open connections (default 10 000).
     // Excess connections are immediately closed with 503.
+    //
+    // listen_here: false = join the group without opening a listener (Windows,
+    // where SO_REUSEPORT does not exist: one server accepts and the group's
+    // handoff spreads the connections).
     //
     // conn_count: optional shared counter — pass the same one to every
     // TcpServer instance so the limit is enforced globally across all threads.
@@ -19,7 +33,9 @@ public:
     TcpServer(const std::string& host, uint16_t port,
               EventLoop& loop, lux::DispatchFn dispatch,
               int max_connections = 10'000,
-              std::shared_ptr<std::atomic<int>> conn_count = nullptr);
+              std::shared_ptr<std::atomic<int>> conn_count = nullptr,
+              std::shared_ptr<Group> group = nullptr,
+              bool listen_here = true);
     ~TcpServer();
 
     // Stop accepting new connections without shutting down the event loop.
@@ -50,7 +66,19 @@ private:
     // the counter on close without holding a pointer back to TcpServer.
     std::shared_ptr<std::atomic<int>> conn_count_;
 
+    std::shared_ptr<Group>            group_;
+    // This loop's open connections (the HttpConnection lowers it on close).
+    std::shared_ptr<std::atomic<int>> live_ = std::make_shared<std::atomic<int>>(0);
+
+    // This loop's connections, to close the idle ones when the orderly shutdown starts (before,
+    // it waited for the clients -- a browser keeps them open for tens of seconds). Only touched
+    // from the loop's own thread; expired entries are pruned as connections come in.
+    std::vector<std::weak_ptr<http::HttpConnection>> conns_;
+    bool stopping_ = false;
+
     void on_accept();
+    void adopt(int client_fd);
+    void register_listen_fd();
 };
 
 } // namespace lux::core

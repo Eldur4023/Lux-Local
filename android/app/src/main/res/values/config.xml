@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <bool name="needs_all_files">false</bool>
+    <!-- true: wake up every ~15 min (inexact alarm) to call POST /api/sync; off by default (battery) -->
+    <bool name="background_sync">false</bool>
+</resources>

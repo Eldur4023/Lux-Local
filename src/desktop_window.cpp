@@ -1,12 +1,85 @@
 #include "desktop_window.hpp"
 #include <webview/webview.h>
+#ifdef __linux__
 #include <gtk/gtk.h>
 #include <gio/gio.h>
+#else
+#include <windows.h>
+#include <commctrl.h>
+#include <commdlg.h>
+#include <shlobj.h>
+#include <fstream>
+#include <vector>
+#include <filesystem>
+#include <string>
+#include <cstring>
+#include <cwchar>
+#include <iterator>
+#endif
 
 #include <future>
 
+#ifndef __linux__
+namespace {
+HWND hwnd_of(webview_t w) { return static_cast<HWND>(webview_get_window(w)); }
+
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring out(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
+    return out;
+}
+std::string narrow(const std::wstring& s) {
+    if (s.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// Single window per process: fullscreen bookkeeping and the live size live here.
+struct FsState { bool on = false; LONG style = 0; WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)}; };
+FsState g_fs;
+
+// Keeps the live client size (WM_SIZE) in the DesktopWindow's atomics, since the HWND is gone once run() returns.
+struct SizeSink { std::atomic<int>* w; std::atomic<int>* h; };
+LRESULT CALLBACK size_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    if (msg == WM_SIZE && wp != SIZE_MINIMIZED) {
+        auto* sink = reinterpret_cast<SizeSink*>(ref);
+        sink->w->store(LOWORD(lp));
+        sink->h->store(HIWORD(lp));
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// .ico -> LoadImage. Anything else (PNG) -> CreateIconFromResourceEx, which since Vista takes raw PNG bytes.
+// A missing/unsupported icon is cosmetic, never fatal.
+void set_window_icon(HWND hwnd, const std::string& path) {
+    std::wstring wpath = widen(path);
+    HICON big = nullptr, small = nullptr;
+    auto ends_ico = path.size() >= 4 && _stricmp(path.c_str() + path.size() - 4, ".ico") == 0;
+    if (ends_ico) {
+        big   = (HICON)LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXICON),   GetSystemMetrics(SM_CYICON),   LR_LOADFROMFILE);
+        small = (HICON)LoadImageW(nullptr, wpath.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+    } else {
+        std::ifstream in(std::filesystem::path(wpath), std::ios::binary);
+        std::vector<BYTE> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (bytes.empty()) return;
+        big   = CreateIconFromResourceEx(bytes.data(), (DWORD)bytes.size(), TRUE, 0x00030000, GetSystemMetrics(SM_CXICON),   GetSystemMetrics(SM_CYICON),   LR_DEFAULTCOLOR);
+        small = CreateIconFromResourceEx(bytes.data(), (DWORD)bytes.size(), TRUE, 0x00030000, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    }
+    if (big)   SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)big);
+    if (small) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
+}
+} // namespace
+#endif
+
 DesktopWindow::DesktopWindow(Options opts) {
-    auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
+#ifdef __linux__
+    if (opts.dark)
+        if (GtkSettings* settings = gtk_settings_get_default())
+            g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, nullptr);
     // GDK puts WM_COMMAND on its X11 group-leader window, and KDE's ksmserver
     // saves every window carrying it as a "legacy session" app and relaunches
     // it at login -- outside the .desktop launcher (so a pinned taskbar icon
@@ -14,9 +87,27 @@ DesktopWindow::DesktopWindow(Options opts) {
     if (GdkDisplay* display = gdk_display_get_default())
         gdk_property_delete(gdk_display_get_default_group(display),
                             gdk_atom_intern_static_string("WM_COMMAND"));
+#endif
+    // (Windows: webview.h picks the dark title bar from the system theme itself; opts.dark is not applied.)
+    auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
                       opts.resizable ? WEBVIEW_HINT_NONE : WEBVIEW_HINT_FIXED);
+#ifndef __linux__
+    if (!opts.icon.empty()) set_window_icon(hwnd_of(w), opts.icon);
+    last_width_  = opts.width;
+    last_height_ = opts.height;
+    // Leaked on purpose: lives as long as the window (one per process).
+    SetWindowSubclass(hwnd_of(w), size_proc, 1,
+                      reinterpret_cast<DWORD_PTR>(new SizeSink{&last_width_, &last_height_}));
+#else
+    // No white flash before the first paint: paint the view with the theme colour; and a single-page local
+    // app needs no big HTTP cache (DOCUMENT_VIEWER keeps WebKit's memory/disk cache small).
+    if (GtkWidget* view = gtk_bin_get_child(GTK_BIN(webview_get_window(w)))) {
+        GdkRGBA bg = opts.dark ? GdkRGBA{0.106, 0.106, 0.122, 1.0} : GdkRGBA{1.0, 1.0, 1.0, 1.0};
+        webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(view), &bg);
+    }
+    webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
     if (!opts.icon.empty()) {
         // Safe to call directly (not through webview_dispatch): the GTK
         // main loop has not started yet at this point in construction, and
@@ -41,11 +132,21 @@ DesktopWindow::DesktopWindow(Options opts) {
             self->last_height_.store(event->height);
             return FALSE; // let the event propagate to GTK's own handling
         }), this);
+#endif
     handle_ = w;
 }
 
 DesktopWindow::~DesktopWindow() {
-    if (handle_) webview_destroy(static_cast<webview_t>(handle_));
+    if (!handle_) return;
+    auto w = static_cast<webview_t>(handle_);
+#ifdef __linux__
+    // webview's GTK engine destructor is `= default`: it never destroys the
+    // window, so a closed window stayed on screen (and its WebKit connections
+    // kept the server's 30 s drain waiting) until the process exited.
+    gtk_widget_destroy(GTK_WIDGET(webview_get_window(w)));
+    while (gtk_events_pending()) gtk_main_iteration();
+#endif
+    webview_destroy(w);
 }
 
 void DesktopWindow::run(const std::string& url) {
@@ -59,15 +160,6 @@ void DesktopWindow::run(const std::string& url) {
 
 void DesktopWindow::terminate() {
     if (running_.exchange(false)) webview_terminate(static_cast<webview_t>(handle_));
-}
-
-void DesktopWindow::reload() {
-    // webview_dispatch marshals the call onto the window's own thread --
-    // reload() is meant to be called from the file-watcher thread, which is
-    // never the thread run() is blocking on.
-    webview_dispatch(static_cast<webview_t>(handle_),
-        [](webview_t w, void*) { webview_eval(w, "location.reload()"); },
-        nullptr);
 }
 
 void DesktopWindow::set_title(const std::string& title) {
@@ -87,14 +179,22 @@ void DesktopWindow::set_title(const std::string& title) {
 void DesktopWindow::minimize() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
+#ifdef __linux__
             gtk_window_iconify(GTK_WINDOW(webview_get_window(w)));
+#else
+            ShowWindow(hwnd_of(w), SW_MINIMIZE);
+#endif
         }, nullptr);
 }
 
 void DesktopWindow::maximize() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
+#ifdef __linux__
             gtk_window_maximize(GTK_WINDOW(webview_get_window(w)));
+#else
+            ShowWindow(hwnd_of(w), SW_MAXIMIZE);
+#endif
         }, nullptr);
 }
 
@@ -104,29 +204,64 @@ void DesktopWindow::restore() {
             // present(), not unmaximize()+deiconify(): this is "show the
             // window" (second launch), and unmaximizing threw away a
             // maximized window's size every time.
+#ifdef __linux__
             gtk_window_present(GTK_WINDOW(webview_get_window(w)));
+#else
+            HWND h = hwnd_of(w);
+            ShowWindow(h, IsIconic(h) ? SW_RESTORE : SW_SHOW);
+            SetForegroundWindow(h);
+#endif
         }, nullptr);
 }
 
 void DesktopWindow::fullscreen() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
+#ifdef __linux__
             gtk_window_fullscreen(GTK_WINDOW(webview_get_window(w)));
+#else
+            HWND h = hwnd_of(w);
+            if (g_fs.on) return;
+            MONITORINFO mi{sizeof(mi)};
+            if (!GetWindowPlacement(h, &g_fs.placement) ||
+                !GetMonitorInfo(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return;
+            g_fs.style = GetWindowLong(h, GWL_STYLE);
+            g_fs.on = true;
+            SetWindowLong(h, GWL_STYLE, g_fs.style & ~WS_OVERLAPPEDWINDOW);
+            SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+#endif
         }, nullptr);
 }
 
 void DesktopWindow::unfullscreen() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
+#ifdef __linux__
             gtk_window_unfullscreen(GTK_WINDOW(webview_get_window(w)));
+#else
+            HWND h = hwnd_of(w);
+            if (!g_fs.on) return;
+            g_fs.on = false;
+            SetWindowLong(h, GWL_STYLE, g_fs.style);
+            SetWindowPlacement(h, &g_fs.placement);
+            SetWindowPos(h, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+#endif
         }, nullptr);
 }
 
 void DesktopWindow::set_always_on_top(bool on_top) {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void* arg) {
+#ifdef __linux__
             gtk_window_set_keep_above(GTK_WINDOW(webview_get_window(w)),
                                        arg != nullptr);
+#else
+            SetWindowPos(hwnd_of(w), arg ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#endif
         }, reinterpret_cast<void*>(static_cast<intptr_t>(on_top)));
 }
 
@@ -135,11 +270,18 @@ struct FilePickCtx {
     std::promise<std::string> result;
     std::string               suggested_name;
     bool                      save_mode;
+    bool                      folder = false;
 };
 } // namespace
 
+std::string DesktopWindow::pick_folder() { return pick("", false, true); }
+
 std::string DesktopWindow::pick_file(const std::string& suggested_name, bool save_mode) {
-    auto* ctx = new FilePickCtx{{}, suggested_name, save_mode};
+    return pick(suggested_name, save_mode, false);
+}
+
+std::string DesktopWindow::pick(const std::string& suggested_name, bool save_mode, bool folder) {
+    auto* ctx = new FilePickCtx{{}, suggested_name, save_mode, folder};
     auto future = ctx->result.get_future();
 
     // gtk_dialog_run() nests its own main loop until the dialog closes, so
@@ -148,14 +290,16 @@ std::string DesktopWindow::pick_file(const std::string& suggested_name, bool sav
     // are `is_async`: pick_file() itself blocks the CALLING thread (a
     // lux::blocking_pool() worker) on this future the whole time, never the
     // window's own thread or an event-loop thread.
+#ifdef __linux__
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void* arg) {
             auto* ctx = static_cast<FilePickCtx*>(arg);
             GtkWindow* parent = GTK_WINDOW(webview_get_window(w));
-            GtkFileChooserAction action = ctx->save_mode ? GTK_FILE_CHOOSER_ACTION_SAVE
-                                                          : GTK_FILE_CHOOSER_ACTION_OPEN;
+            GtkFileChooserAction action = ctx->folder    ? GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER
+                                        : ctx->save_mode ? GTK_FILE_CHOOSER_ACTION_SAVE
+                                                         : GTK_FILE_CHOOSER_ACTION_OPEN;
             GtkWidget* dialog = gtk_file_chooser_dialog_new(
-                ctx->save_mode ? "Save File" : "Open File", parent, action,
+                ctx->folder ? "Select Folder" : ctx->save_mode ? "Save File" : "Open File", parent, action,
                 "_Cancel", GTK_RESPONSE_CANCEL,
                 ctx->save_mode ? "_Save" : "_Open", GTK_RESPONSE_ACCEPT,
                 nullptr);
@@ -172,10 +316,44 @@ std::string DesktopWindow::pick_file(const std::string& suggested_name, bool sav
             ctx->result.set_value(path);
             delete ctx;
         }, ctx);
+#else
+    webview_dispatch(static_cast<webview_t>(handle_),
+        [](webview_t w, void* arg) {
+            auto* ctx = static_cast<FilePickCtx*>(arg);
+            HWND parent = hwnd_of(w);
+            std::wstring path;
+            if (ctx->folder) {
+                // CoInitializeEx was done by webview.h on this (the window's) thread.
+                BROWSEINFOW bi{};
+                bi.hwndOwner = parent;
+                bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                if (PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi)) {
+                    wchar_t buf[MAX_PATH];
+                    if (SHGetPathFromIDListW(pidl, buf)) path = buf;
+                    CoTaskMemFree(pidl);
+                }
+            } else {
+                wchar_t buf[32768] = {};
+                std::wstring name = widen(ctx->suggested_name);
+                if (ctx->save_mode) wcsncpy(buf, name.c_str(), 32767);
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner   = parent;
+                ofn.lpstrFile   = buf;
+                ofn.nMaxFile    = 32768;
+                ofn.Flags       = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
+                                  (ctx->save_mode ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+                if (ctx->save_mode ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn)) path = buf;
+            }
+            ctx->result.set_value(narrow(path));
+            delete ctx;
+        }, ctx);
+#endif
 
     return future.get();
 }
 
+#ifdef __linux__
 namespace {
 
 // A menu item's action is a route path the app itself declared -- not user
@@ -445,3 +623,56 @@ void DesktopWindow::clipboard_write(const std::string& text) {
             delete t;
         }, copy);
 }
+#else // Windows
+// Native menu bar, tray icon and desktop notifications are not implemented on Windows yet: window.set_menu()/
+// set_tray()/notify() are accepted and ignored (cosmetic features; the app's own HTML UI keeps working).
+void DesktopWindow::set_menu(const lux_script::Value&) {}
+void DesktopWindow::set_tray(const std::string&, const std::string&) {}
+void DesktopWindow::notify(const std::string&, const std::string&) {}
+
+namespace {
+struct ClipCtx { std::promise<std::string> result; };
+}
+
+std::string DesktopWindow::clipboard_read() {
+    auto* ctx = new ClipCtx();
+    auto future = ctx->result.get_future();
+    webview_dispatch(static_cast<webview_t>(handle_),
+        [](webview_t w, void* arg) {
+            auto* ctx = static_cast<ClipCtx*>(arg);
+            std::string text;
+            if (OpenClipboard(hwnd_of(w))) {
+                if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+                    if (auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+                        text = narrow(p);
+                        GlobalUnlock(h);
+                    }
+                }
+                CloseClipboard();
+            }
+            ctx->result.set_value(text);
+            delete ctx;
+        }, ctx);
+    return future.get();
+}
+
+void DesktopWindow::clipboard_write(const std::string& text) {
+    auto* copy = new std::string(text);
+    webview_dispatch(static_cast<webview_t>(handle_),
+        [](webview_t w, void* arg) {
+            auto* t = static_cast<std::string*>(arg);
+            std::wstring ws = widen(*t);
+            delete t;
+            if (!OpenClipboard(hwnd_of(w))) return;
+            EmptyClipboard();
+            if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (ws.size() + 1) * sizeof(wchar_t))) {
+                if (auto* p = static_cast<wchar_t*>(GlobalLock(h))) {
+                    memcpy(p, ws.c_str(), (ws.size() + 1) * sizeof(wchar_t));
+                    GlobalUnlock(h);
+                    SetClipboardData(CF_UNICODETEXT, h);
+                } else GlobalFree(h);
+            }
+            CloseClipboard();
+        }, copy);
+}
+#endif

@@ -74,13 +74,16 @@ static Resultado pedir(Module& mod, const std::string& metodo, const std::string
         }
     }
 
-    ejecutar_sincrono(m.handler(req, res));
-    const auto&      hdrs = res.headers_map();
-    auto              it  = hdrs.find("Location");
-    return {true, res.status_code(), res.body(), it != hdrs.end() ? it->second : std::string()};
+    ejecutar_sincrono((*m.handler)(req, res));
+    const std::string* loc = res.header_value("Location");
+    return {true, res.status_code(), res.body(), loc ? *loc : std::string()};
 }
 
 int main() {
+#ifdef _WIN32
+    std::puts("skipped: the --native backend (g++ + dlopen) is not available on Windows");
+    return 0;
+#endif
     const auto dir_db = std::filesystem::temp_directory_path() / "lux_native_route_check";
     std::error_code ec_db;
     std::filesystem::create_directories(dir_db, ec_db);

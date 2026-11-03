@@ -7,7 +7,7 @@
 // Window title/size come from app/app.lux's own `window:` block (see
 // vendor/lux/src/lux_script/modules/window.cpp), never from here or from
 // CMakeLists.txt: this file has nothing app-specific in it.
-#include "resources.hpp"
+#include "extract.hpp"
 #include "desktop_window.hpp"
 
 #include <lux_script/project.hpp>
@@ -17,21 +17,51 @@
 #include <lux/app.hpp>
 #include <lux/logger.hpp>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#else
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <csignal>
 #include <fstream>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <optional>
 #include <thread>
-#include <unistd.h>
+#include <cerrno>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
+int lux_main(int argc, char** argv);   // vendor/lux main.cpp, compiled with LUX_EMBEDDED
+
+#ifdef _WIN32
+// Winsock spelling of the few POSIX socket calls used below.
+using socklen_t = int;
+static inline int sock_close(SOCKET fd) { return ::closesocket(fd); }
+using sock_t = SOCKET;
+static constexpr sock_t kBadSock = INVALID_SOCKET;
+#else
+static inline int sock_close(int fd) { return ::close(fd); }
+using sock_t = int;
+static constexpr sock_t kBadSock = -1;
+#endif
+
 namespace {
+
+// Paths inside the binary (respack) and in app.lux are UTF-8; fs::path(std::string) would read them as the
+// ANSI code page on Windows. Same result as fs::path(s) on Linux.
+fs::path u8path(const std::string& s) {
+    return fs::path(std::u8string(s.begin(), s.end()));
+}
 
 // Set right before the window is force-closed by an external signal (see
 // DesktopWindow::terminate() below) -- tells apart "the user closed the
@@ -91,6 +121,14 @@ void install_window_control_hooks() {
         }
         return w ? w->pick_file(suggested_name, save_mode) : std::string();
     };
+    ctl.pick_folder = []() -> std::string {
+        DesktopWindow* w;
+        {
+            std::lock_guard<std::mutex> lk(g_window_mutex);
+            w = g_window;
+        }
+        return w ? w->pick_folder() : std::string();
+    };
     ctl.notify = [](const std::string& title, const std::string& body) {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) g_window->notify(title, body);
@@ -117,42 +155,45 @@ void install_window_control_hooks() {
     };
 }
 
-void extract_resources(const fs::path& dir) {
-    for (const auto& f : kEmbeddedFiles) {
-        fs::path dest = dir / f.path;
-        fs::create_directories(dest.parent_path());
-        std::ofstream out(dest, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(f.data), static_cast<std::streamsize>(f.size));
-    }
-}
-
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
 // it back with getsockname(), then releases it immediately. A small race
 // (something else could grab the same port before Lux's own bind) is the
 // same trade-off every "find a free port" helper makes; fine for a desktop
 // app that only ever talks to itself.
 uint16_t find_free_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
+    sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kBadSock) throw std::runtime_error("socket: " + std::string(std::strerror(errno)));
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_port        = 0;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
+        sock_close(fd);
         throw std::runtime_error("bind: " + std::string(std::strerror(errno)));
     }
     socklen_t len = sizeof(addr);
     ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
     uint16_t port = ntohs(addr.sin_port);
-    ::close(fd);
+    sock_close(fd);
     return port;
 }
 
+#ifdef _WIN32
+// %APPDATA% / %LOCALAPPDATA% via the wide environment (a user name with non-ASCII letters survives).
+fs::path win_env_dir(const wchar_t* var) {
+    if (const wchar_t* v = _wgetenv(var); v && *v) return fs::path(v);
+    return fs::temp_directory_path();
+}
+#endif
+
 fs::path xdg_data_home() {
+#ifdef _WIN32
+    return win_env_dir(L"APPDATA");
+#else
     if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) return fs::path(xdg);
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / ".local" / "share";
+#endif
 }
 
 // A display name turned into a safe filesystem/.desktop-file identifier:
@@ -177,9 +218,13 @@ std::string resolve_display_name(const std::shared_ptr<lux_script::Module>& mod)
 }
 
 fs::path xdg_cache_home() {
+#ifdef _WIN32
+    return win_env_dir(L"LOCALAPPDATA");
+#else
     if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) return fs::path(xdg);
     const char* home = std::getenv("HOME");
     return fs::path(home ? home : ".") / ".cache";
+#endif
 }
 
 fs::path geometry_file(const std::string& id) {
@@ -214,6 +259,13 @@ void save_geometry(const std::string& id, int width, int height) {
 // binary does, it writes outside its own temp directory, into the user's
 // actual desktop environment (~/.local/share/applications), so it needs to
 // be asked for explicitly.
+#ifdef _WIN32
+int install_desktop(const std::shared_ptr<lux_script::Module>&, const fs::path&) {
+    // A Start Menu shortcut needs IShellLink (COM); not implemented -- use the installer / pin the .exe instead.
+    std::cerr << "luxdesktop: --install-desktop is Linux-only (no Start Menu shortcut support on Windows yet)\n";
+    return 1;
+}
+#else
 int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::path& work_dir) {
     char exe_path[4096];
     ssize_t n = ::readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -238,7 +290,7 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
     // permanent, in the standard icon theme location, before that happens.
     std::string icon_line;
     if (!wcfg.icon.empty()) {
-        fs::path src_icon = work_dir / wcfg.icon;
+        fs::path src_icon = work_dir / u8path(wcfg.icon);
         if (fs::exists(src_icon, ec)) {
             fs::create_directories(icons_dir, ec);
             fs::path dst_icon = icons_dir / (id + src_icon.extension().string());
@@ -262,28 +314,47 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
               << "            find \"" << display_name << "\" in your application menu.\n";
     return 0;
 }
+#endif
 
 bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd >= 0) {
+        sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd != kBadSock) {
             sockaddr_in addr{};
             addr.sin_family      = AF_INET;
             addr.sin_port        = htons(port);
             addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             bool ok = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
-            ::close(fd);
+            sock_close(fd);
             if (ok) return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return false;
 }
 
 } // namespace
 
+#ifdef _WIN32
+// Console close / logoff / shutdown: ask the server to drain like SIGTERM does on Linux (the window closes when it
+// stops). Windows kills the process shortly after this returns, so it waits for the exit.
+BOOL WINAPI console_ctrl(DWORD type) {
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        std::raise(SIGTERM);
+        Sleep(5000);
+        return TRUE;
+    }
+    return FALSE;   // CTRL_C / CTRL_BREAK: Lux's own SIGINT handling
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);   // refcounted: harmless if Lux's platform layer also calls it
+    SetConsoleCtrlHandler(console_ctrl, TRUE);
+#endif
     bool install = argc > 1 && std::string(argv[1]) == "--install-desktop";
 
     // Resources are extracted to a PERSISTENT directory (XDG data home), not
@@ -295,7 +366,7 @@ int main(int argc, char** argv) {
 #ifndef LUXDESKTOP_APP_ID
 #define LUXDESKTOP_APP_ID "app"
 #endif
-    fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;
+    fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;   // Windows: %APPDATA%\lux-desktop\<id>
     fs::create_directories(work_dir);
     extract_resources(work_dir);
     fs::current_path(work_dir); // the app's own paths (templates "./templates",
@@ -323,54 +394,36 @@ int main(int argc, char** argv) {
         return install_desktop(mod, work_dir);
     }
 
-    lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    auto dispatch = [mod](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto match = mod->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([mod](int code, lux::Request& req, lux::Response& res) {
-        auto it = mod->error_handlers.find(code);
-        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
-        if (it == mod->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &mod->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
+    // The UI server is Lux itself (vendor/lux main.cpp, built with LUX_EMBEDDED),
+    // run on a thread in this process so `window.*` reaches this very window.
+    // It must only ever be reachable from this machine.
+    const std::string& host = mod->program.app.host;
+    if (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+        std::cerr << "luxdesktop: app.lux must declare `host \"127.0.0.1\"` (found \""
+                  << host << "\"): the UI server is for this machine only.\n";
+        return 1;
+    }
 
     uint16_t port = find_free_port();
+    std::string port_arg = std::to_string(port);
+    static char arg0[] = "lux", arg1[] = "--no-watch", arg2[] = "--port", arg4[] = ".";
+    char* lux_argv[] = {arg0, arg1, arg2, port_arg.data(), arg4, nullptr};
 
-    // Force-closes the window if a signal (CTRL+C from a terminal, a
-    // desktop "quit" action, systemd stop...) starts the shutdown before
-    // the user closes the window by hand -- otherwise the server drains but
-    // the window stays open with nothing behind it.
-    app.on_before_stop([] {
+    // Server stopped by itself (SIGTERM from systemd, CTRL+C...): close the window too.
+    // A desktop shell has no use for one event loop + worker per core: 2 threads each (override: LUX_THREADS).
+#ifdef _WIN32
+    if (!std::getenv("LUX_THREADS")) _putenv("LUX_THREADS=2");
+#else
+    ::setenv("LUX_THREADS", "2", 0);
+#endif
+    std::thread server_thread([&lux_argv] {
+        lux_main(5, lux_argv);
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
-
-    std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
     if (!wait_for_server(port, std::chrono::milliseconds(5000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
 
@@ -382,6 +435,7 @@ int main(int argc, char** argv) {
     opts.width     = wcfg.width;
     opts.height    = wcfg.height;
     opts.resizable = wcfg.resizable;
+    opts.dark      = wcfg.dark;
     opts.devtools  = wcfg.devtools;
     opts.icon      = wcfg.icon;
     // A size the user already resized to on a previous run wins over the
@@ -389,14 +443,31 @@ int main(int argc, char** argv) {
     // not something to snap back to every time.
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    DesktopWindow window(opts);
+    std::optional<DesktopWindow> window(std::in_place, opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &window;
+        g_window = &*window;
     }
     install_window_control_hooks();
-    window.run("http://127.0.0.1:" + std::to_string(port) + "/");
-    save_geometry(app_id, window.last_width(), window.last_height());
+    // An app that guards its local API with a secret keeps it in `api-token` (mode 600) in its work dir; the page
+    // gets it in the URL fragment (never sent to the server) and puts it on every request.
+    std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
+    {
+        std::ifstream tok_file(work_dir / "api-token");
+        std::string tok;
+        if (tok_file >> tok && !tok.empty()) url += "#t=" + tok;
+    }
+    window->run(url);
+    save_geometry(app_id, window->last_width(), window->last_height());
+
+    // Destroy the window before waiting on the server: the webview keeps its
+    // keep-alive connections open, and the server's drain waits up to 30 s
+    // for them -- the closed window stayed on screen all that time.
+    {
+        std::lock_guard<std::mutex> lk(g_window_mutex);
+        g_window = nullptr;
+    }
+    window.reset();
 
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.
@@ -414,3 +485,15 @@ int main(int argc, char** argv) {
     // biblioteca entera en cada cierre de ventana.
     return 0;
 }
+
+#if defined(_WIN32) && !defined(LUXDESKTOP_CONSOLE)
+// GUI subsystem entry point (CMake WIN32_EXECUTABLE). Re-attaches to the launching console, if any, so
+// stderr diagnostics still show when started from cmd/PowerShell; then runs the normal main().
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        std::freopen("CONOUT$", "w", stdout);
+        std::freopen("CONOUT$", "w", stderr);
+    }
+    return main(__argc, __argv);
+}
+#endif

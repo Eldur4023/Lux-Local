@@ -8,11 +8,19 @@ separately, no crate tree to download.
 
 Lux is vendored as plain source under `vendor/lux/` (copied in, not a git
 submodule — no network access needed to build this project once it's
-checked out) and used as a library, with one small, documented addition: a
-`window` module (`vendor/lux/src/lux_script/modules/window.cpp`) using
-Lux's own drop-in module mechanism, purely so window title/size can be
-declared from LuxScript itself instead of from CMake or C++. Nothing about
-how Lux itself works is changed.
+checked out), taken from the `dev` branch of the main Lux repo, with one
+documented addition that is NOT in Lux: a `window` module
+(`vendor/lux/src/lux_script/modules/window.cpp`, `window_config.hpp`,
+`window_control.hpp`) using Lux's own drop-in module mechanism, so window
+title/size/theme can be declared from LuxScript itself and a route can open
+file/folder pickers, notifications, the clipboard... This repo is the home of
+that module; apps vendor it from here. Any change to Lux itself is made in the
+main Lux repo (`dev`) and then re-vendored, never edited in `vendor/lux/`.
+Exception, local patches pending upstreaming: `LUX_THREADS` env var (`src/app.cpp`) and the close-idle-keep-alive-on-drain
+shutdown (`tcp_server.*`, `http_connection.*`, ported from Lux commit 706adc1); plus a `gtk_main_quit` guard in
+`third_party/webview/webview.h`.
+The desktop shell starts the app with Lux's own `main()` (`lux_main()`, built
+with `LUX_EMBEDDED`) on a thread, so it behaves exactly like `lux ./app`.
 
 ## Where you work
 
@@ -182,7 +190,6 @@ needs (llhttp) is vendored inside `vendor/lux/third_party/`.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ./build/app        # the packaged binary -- respack embeds a snapshot of app/
-./build/app-dev     # dev mode -- reads app/ live, hot-reloads on save
 ```
 
 ## Installing it as a real app
@@ -208,19 +215,78 @@ nothing fancier) right as the window closes, and read back before the next
 one opens. The `window:` block's `width`/`height` are the first-launch
 default, not something the window snaps back to on every run.
 
+## Guarding the local API
+
+Loopback is not private on a shared machine or on a phone: other apps can open the port. An app that wants to protect its API keeps a
+secret in `api-token` (mode 600) in its work dir -- created in an `on start:` hook, so it exists before the port opens -- and its routes check it
+(Mail: `require api_ok() else status(401)`, header `X-Mail-Token`). The desktop shell (`src/runtime.cpp`) and the Android Activity read that file and
+hand the secret to the page in the URL fragment (`#t=...`, never sent to the server); the page puts it on every request. The Android boot also
+refuses to start an app that does not declare `host "127.0.0.1"`.
+
 ## Dev mode
 
-`./build/app-dev` reads `app/` straight off disk instead of an embedded
-snapshot: no `respack`, no rebuilding this binary after editing a `.lux`
-file, a template or a static asset. A background thread watches `app/` and
-recompiles through the same `lux_script::compile()` the packaged binary
-uses — LuxScript compiles to bytecode in milliseconds, no `g++` involved —
-and the window's page reloads on its own once it succeeds. A syntax error
-is printed and the previous, working version keeps serving; the window
-never goes down over a typo. Devtools are always on in this mode.
+There is no separate dev binary any more (the old `app-dev` used a Lux API that no longer exists). For hot reload
+while you work, serve the app with Lux itself and open it in a browser: `./build/vendor/lux/lux app` (the `window`
+module is not available there, so keep window-only calls behind a check or test them in the packaged binary).
 
 ## What this is not (yet)
 
 - **Linux only**, same as Lux itself (epoll, `sendfile(2)`, `SO_REUSEPORT`).
 - The menu has no radio-button groups yet (nested submenus, keyboard
   accelerators and checkboxes all work).
+
+## Android
+
+The window shell is the only GTK-specific part: `src/boot.cpp` (extract, compile, serve on loopback) is
+platform-independent, and `src/android.cpp` exposes it over JNI as `libluxlocal.so` with no GTK/WebKit.
+The Kotlin side hosts a `WebView` and loads the port returned by `LuxLocal.start(filesDir)`:
+
+```kotlin
+package dev.lux.local
+object LuxLocal { init { System.loadLibrary("luxlocal") }
+                  external fun start(dataDir: String): Int   // port, -1 on failure
+                  external fun stop() }
+// webView.loadUrl("http://127.0.0.1:${LuxLocal.start(filesDir.path)}/")
+```
+
+Build (NDK r26+, API 28 minimum -- bionic has `posix_spawn` from 28; respack runs on the host):
+
+    cmake -S . -B build && cmake --build build --target respack
+    cmake -S . -B build-android -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DLUX_HOST_RESPACK=$PWD/build/respack \
+          -DLUX_POSTGRES=OFF -DLUX_MYSQL=OFF -DLUX_PDF=OFF -DLUX_HTTP=OFF -DLUX_JEMALLOC=OFF
+    cmake --build build-android --target luxlocal
+
+With `http`/`mail`/`imap` (static OpenSSL + libcurl, cross-built by `tools/android-deps.sh`) and SQLite (vendored in
+`third_party/sqlite`, FTS5 on; used automatically on Android), and the `time` module through `third_party/date` (Hinnant's
+date/tz, because the NDK's libc++ has no C++20 time zone database):
+
+    ANDROID_NDK=$ANDROID_NDK tools/android-deps.sh arm64-v8a      # -> build-android-deps/arm64-v8a
+    D=$PWD/build-android-deps/arm64-v8a
+    PKG_CONFIG_LIBDIR=$D/lib/pkgconfig cmake -S . -B build-android ... -DLUX_PDF=OFF \
+          -DCMAKE_SHARED_LINKER_FLAGS="-L$D/lib"
+
+TLS trusts Android's system CA directory (`/system/etc/security/cacerts`).
+
+Gradle project in `android/` (a plain `Activity` + `WebView` + `LuxLocal.kt`); `tools/android-build.sh` builds the
+`.so` for each ABI into `android/app/src/main/jniLibs/`, then:
+
+    ANDROID_NDK=... tools/android-build.sh arm64-v8a x86_64
+    cd android && gradle assembleDebug          # JDK 17, Gradle 8.7, SDK 34 (sdk.dir in local.properties)
+
+Checked on an x86_64 emulator (Android 14): the demo app boots, serves over loopback and the +1 button round-trips
+to the Lux server. Not tested on a real arm64 device.
+
+The mail modules (`imap`, `mail`, `mailparse`, `keyring`) are part of Lux (`dev`). `keyring` keeps `secret-tool` on desktop and, on
+Android, uses `lux_script::keyring_control()` hooks that `src/android.cpp` points at `LuxLocal.secretGet/Set/Delete`
+(AES-GCM key in the Android Keystore, ciphertext in private SharedPreferences). `tools/android-deps.sh` pins curl 8.18.0:
+8.19.0-8.22.0 return an empty body for custom IMAP commands (`UID FETCH ...`).
+
+`window.notify` is wired to a system notification. Background sync needs no foreground service (so no permanent notification):
+`Sync.kt` chains wake-up alarms that call `POST /api/sync` every 2 minutes -- that route is the app's own business (Mail's notifies new mail
+through `window.notify`). TLS: `src/android.cpp` builds a PEM bundle from the system CAs (`SSL_CERT_FILE`), which the `http`/`mail`/`imap`
+modules hand to curl through `lux_curl_init()`.
+
+The `window` hooks wired on Android: `notify`, `pick_file`/`pick_folder` (system document/folder pickers; downloads go to
+Downloads, which needs "All files access": `needs_all_files` in `res/values/config.xml`) and `clipboard_write`. Not wired: tray,
+menu, window sizing, `clipboard_read`.
