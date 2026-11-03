@@ -2,6 +2,7 @@
 #include <webview/webview.h>
 #ifdef __linux__
 #include <gtk/gtk.h>
+#include <gdk/gdkx.h>
 #include <gio/gio.h>
 #else
 #include <windows.h>
@@ -84,7 +85,9 @@ DesktopWindow::DesktopWindow(Options opts) {
     // saves every window carrying it as a "legacy session" app and relaunches
     // it at login -- outside the .desktop launcher (so a pinned taskbar icon
     // never binds to that window) and racing any autostart launch.
-    if (GdkDisplay* display = gdk_display_get_default())
+    // X11 only: on a native Wayland session the group leader is not an X11 window and
+    // gdk_property_delete() segfaults.
+    if (GdkDisplay* display = gdk_display_get_default(); GDK_IS_X11_DISPLAY(display))
         gdk_property_delete(gdk_display_get_default_group(display),
                             gdk_atom_intern_static_string("WM_COMMAND"));
 #endif
