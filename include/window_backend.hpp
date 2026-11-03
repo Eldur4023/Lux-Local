@@ -16,6 +16,7 @@ struct WindowOptions {
     bool        devtools  = false;
     std::string icon;             // path to an image file, or empty for none
     std::string app_id;           // stable id of the app (Luxium keeps one profile per id)
+    std::string wm_class;         // X11 WM_CLASS of the Luxium window (match the .desktop file's StartupWMClass); "" = app_id
 };
 
 // All methods are thread-safe except run(), which must be called on the
@@ -28,6 +29,9 @@ public:
     virtual void run(const std::string& url) = 0;
     // Makes run() return, as if the user had closed the window.
     virtual void terminate() = 0;
+
+    // Reloads the page (dev mode: the sources changed on disk).
+    virtual void reload() = 0;
 
     virtual void set_title(const std::string& title) = 0;
     virtual void minimize() = 0;

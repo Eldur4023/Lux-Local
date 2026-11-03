@@ -356,6 +356,11 @@ std::string DesktopWindow::pick(const std::string& suggested_name, bool save_mod
     return future.get();
 }
 
+void DesktopWindow::reload() {
+    webview_dispatch(static_cast<webview_t>(handle_),
+        [](webview_t w, void*) { webview_eval(w, "location.reload()"); }, nullptr);
+}
+
 #ifdef __linux__
 namespace {
 

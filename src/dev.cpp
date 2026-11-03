@@ -1,32 +1,23 @@
-// Dev mode: points straight at app/ on disk -- no respack, no embedding, no
-// rebuilding this binary after editing a .lux file, a template or a static
-// asset. A background thread watches app/'s files exactly the way Lux's own
-// `lux` CLI does (see vendor/lux/src/lux_script/main.cpp's watch_loop) and
-// recompiles through the same lux_script::compile() the release runtime
-// uses -- LuxScript compiles to bytecode in milliseconds, no g++ involved,
-// so "no tener que compilar" holds for every edit inside app/. On a
-// successful recompile the live Module is swapped and the window's page is
-// told to reload, the same way a browser tab would refresh on its own.
-//
-// This is the ONLY difference from src/runtime.cpp: that one embeds a
-// frozen snapshot of app/ into the binary and never watches anything again.
+// Dev mode: serves app/ straight off disk -- no respack, no embedding, no rebuilding this binary after
+// editing a .lux file, a template or a static asset. It is src/runtime.cpp with two differences: Lux's own
+// file watcher stays on (it recompiles .lux files and swaps the live module, see watch_loop in
+// vendor/lux's main.cpp), and a second watcher here reloads the window's page whenever anything under app/
+// changes, the way a browser tab refreshes. Works with either window backend (Luxium host or WebKitGTK).
 #include "desktop_window.hpp"
+#include "luxium_window.hpp"
+#include "window_hooks.hpp"
 
 #include <lux_script/project.hpp>
-#include <lux_script/vm.hpp>
 #include <lux_script/window_config.hpp>
-#include <lux_script/window_control.hpp>
-#include <lux/app.hpp>
 #include <lux/logger.hpp>
 
 #include <arpa/inet.h>
-#include <atomic>
 #include <cctype>
 #include <csignal>
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <mutex>
+#include <memory>
 #include <netinet/in.h>
 #include <optional>
 #include <sys/socket.h>
@@ -37,26 +28,30 @@
 #error "LUXDESKTOP_APP_DIR must be set at compile time (see CMakeLists.txt)"
 #endif
 
+int lux_main(int argc, char** argv);   // vendor/lux main.cpp, built with LUX_EMBEDDED
+
 namespace fs = std::filesystem;
 
 namespace {
 
-std::shared_ptr<lux_script::Module> g_module;
-std::mutex                          g_module_mutex;
-std::atomic<bool>                   g_stop{false};
+std::atomic<bool> g_stop{false};
 
-std::atomic<bool> g_shutdown_from_signal{false};
-DesktopWindow*     g_window = nullptr;
-std::mutex         g_window_mutex;
+// Latest mtime of anything under app/ except data/ (the app's own database changes constantly).
+// std::optional, not a default-constructed file_time_type{} as the "nothing seen yet" sentinel: libstdc++'s
+// file_clock epoch is not 1970, so a real file's time_since_epoch() can compare as LESS than a default one.
+using MTime = std::optional<fs::file_time_type>;
 
-std::shared_ptr<lux_script::Module> current_module() {
-    std::lock_guard<std::mutex> lk(g_module_mutex);
-    return g_module;
-}
-
-void publish_module(std::shared_ptr<lux_script::Module> m) {
-    std::lock_guard<std::mutex> lk(g_module_mutex);
-    g_module = std::move(m);
+MTime latest_mtime(const fs::path& root) {
+    MTime latest;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_directory(ec) && it->path().filename() == "data") { it.disable_recursion_pending(); continue; }
+        if (!it->is_regular_file(ec)) continue;
+        auto t = fs::last_write_time(it->path(), ec);
+        if (!ec && (!latest || t > *latest)) latest = t;
+    }
+    return latest;
 }
 
 void reload_window() {
@@ -64,161 +59,15 @@ void reload_window() {
     if (g_window) g_window->reload();
 }
 
-// Backs the `window` LuxScript module's callable functions -- see the
-// identical block in src/runtime.cpp for the full rationale.
-void install_window_control_hooks() {
-    auto& ctl = lux_script::window_control();
-    ctl.set_title = [](const std::string& title) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_title(title);
-    };
-    ctl.minimize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->minimize();
-    };
-    ctl.maximize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->maximize();
-    };
-    ctl.restore = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->restore();
-    };
-    ctl.close = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->terminate();
-    };
-    ctl.fullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->fullscreen();
-    };
-    ctl.unfullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->unfullscreen();
-    };
-    ctl.set_always_on_top = [](bool on_top) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_always_on_top(on_top);
-    };
-    ctl.pick_file = [](const std::string& suggested_name, bool save_mode) -> std::string {
-        DesktopWindow* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->pick_file(suggested_name, save_mode) : std::string();
-    };
-    ctl.notify = [](const std::string& title, const std::string& body) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->notify(title, body);
-    };
-    ctl.set_menu = [](const lux_script::Value& spec) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_menu(spec);
-    };
-    ctl.set_tray = [](const std::string& icon_path, const std::string& tooltip) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_tray(icon_path, tooltip);
-    };
-    ctl.clipboard_read = []() -> std::string {
-        DesktopWindow* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->clipboard_read() : std::string();
-    };
-    ctl.clipboard_write = [](const std::string& text) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->clipboard_write(text);
-    };
-}
-
-// Lux's own Module::stamps (vendor/lux) only tracks the .lux files
-// themselves -- a template or a static asset changing does not touch it,
-// since compile() re-reads those fresh on every call regardless. Dev mode's
-// whole point is fast iteration on exactly those files, so the mtime watch
-// here additionally walks templates_dir and every static mount's fs_root,
-// taking the single latest mtime across all of it as "the" signal.
-//
-// std::optional, not a default-constructed file_time_type{} as the "nothing
-// seen yet" sentinel: libstdc++'s file_clock epoch is not 1970, so a real
-// file's time_since_epoch() can legitimately compare as LESS than a
-// default-constructed time_point -- found live (every poll read `now == 0`
-// forever, never detecting the edit already on disk) rather than guessed.
-using MTime = std::optional<fs::file_time_type>;
-
-void consider(MTime& latest, MTime candidate) {
-    if (candidate && (!latest || *candidate > *latest)) latest = candidate;
-}
-
-MTime latest_mtime_under(const fs::path& root) {
-    std::error_code ec;
-    MTime latest;
-    if (fs::is_regular_file(root, ec)) {
-        auto t = fs::last_write_time(root, ec);
-        if (!ec) latest = t;
-        return latest;
-    }
-    if (!fs::is_directory(root, ec)) return latest;
-    for (auto it = fs::recursive_directory_iterator(
-             root, fs::directory_options::skip_permission_denied, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
-        auto t = fs::last_write_time(it->path(), ec);
-        if (!ec) consider(latest, t);
-    }
-    return latest;
-}
-
-MTime aggregate_mtime(const lux_script::Module& mod) {
-    MTime latest;
-    std::error_code ec;
-    for (const auto& [path, stamp] : mod.stamps) {
-        auto t = fs::last_write_time(path, ec);
-        if (!ec) consider(latest, t);
-    }
-    if (!mod.program.app.templates_dir.empty())
-        consider(latest, latest_mtime_under(mod.program.app.templates_dir));
-    for (const auto& m : mod.program.app.statics)
-        consider(latest, latest_mtime_under(m.fs_root));
-    return latest;
-}
-
-// Polls that aggregate mtime and recompiles through the exact same
-// lux_script::compile() the packaged runtime uses -- LuxScript compiles to
-// bytecode in milliseconds, no g++ involved, so this never rebuilds
-// app-dev itself. Keeps the previous (working) module if the new one fails
-// to compile, same as Lux's own watch_loop -- a typo never takes the
-// window down.
-void watch_loop(std::vector<fs::path> inputs) {
-    MTime last_seen;
-    bool first = true;
+void watch_loop(fs::path root) {
+    MTime last = latest_mtime(root);
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        if (g_stop.load()) return;
-
-        auto mod = current_module();
-        if (!mod) continue;
-
-        auto now = aggregate_mtime(*mod);
-        if (first) { last_seen = now; first = false; continue; }
-        if (now == last_seen) continue;
-        last_seen = now;
-
-        lux::log().info("changes detected: recompiling");
-        std::this_thread::sleep_for(std::chrono::milliseconds(120)); // let the editor finish writing
-
-        lux_script::DiagnosticBag diags;
-        auto next = lux_script::compile(inputs, diags);
-        if (!diags.empty()) {
-            std::cerr << "\n" << lux_script::format_errors(diags, next->files)
-                      << "reload cancelled: still serving the previous version\n\n";
-            continue;
-        }
-
-        publish_module(next);
-        lux::log().info("reloaded: " + std::to_string(next->program.routes.size()) + " route(s)");
+        const MTime now = latest_mtime(root);
+        if (now == last) continue;
+        last = now;
+        // Lux's watcher polls too: give it time to recompile before the page asks for the new version.
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
         reload_window();
     }
 }
@@ -311,9 +160,8 @@ bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
 
 } // namespace
 
-int main() {
-    fs::current_path(LUXDESKTOP_APP_DIR); // app.lux's own paths ("./templates",
-                                           // "./public") are relative to itself
+int main(int, char** argv) {
+    fs::current_path(LUXDESKTOP_APP_DIR); // app.lux's own paths ("./templates", "./public") are relative to itself
 
     std::vector<fs::path> inputs;
     std::string error;
@@ -321,102 +169,77 @@ int main() {
         std::cerr << "luxdesktop-dev: " << error << "\n";
         return 1;
     }
-
     lux_script::DiagnosticBag diags;
-    auto mod = lux_script::compile(inputs, diags);
+    auto mod = lux_script::compile(inputs, diags);   // fills window_config()
     if (!diags.empty()) {
         std::cerr << lux_script::format_errors(diags, mod->files);
         return 1;
     }
-    publish_module(mod);
-
-    lux::App app;
-    app.set_templates(mod->program.app.templates_dir);
-    for (const auto& m : mod->program.app.statics)
-        app.serve_static(m.url_prefix, m.fs_root, m.spa);
-
-    // Reads current_module() on every request (not a captured `mod`), same
-    // as vendor/lux's own main.cpp: a hot reload has to reach in-flight
-    // dispatch immediately, not just the next process restart.
-    auto dispatch = [](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto live = current_module();
-        if (!live) { res.status(503).json_text(R"({"error":"no module loaded"})"); co_return; }
-        auto match = live->router.match(req.method, req.path);
-        if (!match.found) {
-            res.status(404).json_text(R"({"error":"Not Found"})");
-            co_return;
-        }
-        req.params = std::move(match.params);
-        co_await match.handler(req, res);
-    };
-    app.any("/",  dispatch);
-    app.any("/*", dispatch);
-
-    app.on_error([](int code, lux::Request& req, lux::Response& res) {
-        auto live = current_module();
-        if (!live) return;
-        auto it = live->error_handlers.find(code);
-        if (it == live->error_handlers.end()) it = live->error_handlers.find(0);
-        if (it == live->error_handlers.end()) return;
-        lux_script::NativeCtx ctx{req, res};
-        ctx.error_code    = code;
-        ctx.error_message = res.status_code() >= 500 ? "internal error" : "invalid request";
-        lux_script::VM vm;
-        auto result = vm.start(*it->second, {}, ctx, &live->functions, nullptr);
-        if (result.status == lux_script::VM::Status::Done &&
-            !ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-        res.status(code);
-    });
 
     uint16_t port = find_free_port();
-
-    app.on_before_stop([] {
+    std::string port_arg = std::to_string(port);
+    static char arg0[] = "lux", arg1[] = "--port", arg3[] = ".";
+    char* lux_argv[] = {arg0, arg1, port_arg.data(), arg3, nullptr};
+    ::setenv("LUX_THREADS", "2", 0);
+    std::thread server_thread([&lux_argv] {
+        lux_main(4, lux_argv);   // watch mode stays on: Lux recompiles .lux files itself
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
-
-    std::thread server_thread([&app, port] { app.run("127.0.0.1", port); });
-    if (!wait_for_server(port, std::chrono::milliseconds(5000)))
+    if (!wait_for_server(port, std::chrono::milliseconds(20000)))
         lux::log().warn("server did not come up in time, opening the window anyway");
 
-    std::thread watcher(watch_loop, inputs);
+    std::thread watcher(watch_loop, fs::path(LUXDESKTOP_APP_DIR));
 
     const lux_script::WindowConfig& wcfg = lux_script::window_config();
     std::string app_id = sanitize_id(resolve_display_name(mod));
 
-    DesktopWindow::Options opts;
+    WindowOptions opts;
+    opts.app_id    = app_id + "-dev";   // own Luxium profile: never mixes with the installed app's
     opts.title     = resolve_display_name(mod);
     opts.width     = wcfg.width;
     opts.height    = wcfg.height;
     opts.resizable = wcfg.resizable;
     opts.devtools  = true; // dev mode: always on, no reason to hide it here
+    opts.dark      = wcfg.dark;
     opts.icon      = wcfg.icon;
+    {
+        const std::string a0 = argv[0] ? argv[0] : "";
+        opts.wm_class = a0.substr(a0.find_last_of('/') == std::string::npos ? 0 : a0.find_last_of('/') + 1);
+    }
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    DesktopWindow window(opts);
+    std::unique_ptr<WindowBackend> window;
+#ifdef LUXDESKTOP_LUXIUM
+    if (LuxiumWindow::available()) window = std::make_unique<LuxiumWindow>(opts);
+#endif
+    if (!window) window = std::make_unique<DesktopWindow>(opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &window;
+        g_window = window.get();
     }
     install_window_control_hooks();
     lux::log().info("lux desktop (dev): watching " + fs::path(LUXDESKTOP_APP_DIR).string());
-    window.run("http://127.0.0.1:" + std::to_string(port) + "/");
-    save_geometry(app_id, window.last_width(), window.last_height());
-
-    if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
-    server_thread.join();
-
-    g_stop.store(true);
-    watcher.join();
-
+    window->run("http://127.0.0.1:" + std::to_string(port) + "/");
+    save_geometry(app_id, window->last_width(), window->last_height());
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
         g_window = nullptr;
     }
+    window.reset();
+
+    if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
+    // See LuxServer::stop() in boot.cpp: bound the wait for the orderly shutdown.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(4));
+        std::_Exit(0);
+    }).detach();
+    server_thread.join();
+
+    g_stop.store(true);
+    watcher.join();
     return 0;
 }

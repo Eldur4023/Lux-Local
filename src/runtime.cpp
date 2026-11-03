@@ -11,6 +11,7 @@
 #include "desktop_window.hpp"
 #ifdef LUXDESKTOP_LUXIUM
 #include "luxium_window.hpp"
+#include "window_hooks.hpp"
 #endif
 
 #include <lux_script/project.hpp>
@@ -65,98 +66,6 @@ namespace {
 // ANSI code page on Windows. Same result as fs::path(s) on Linux.
 fs::path u8path(const std::string& s) {
     return fs::path(std::u8string(s.begin(), s.end()));
-}
-
-// Set right before the window is force-closed by an external signal (see
-// DesktopWindow::terminate() below) -- tells apart "the user closed the
-// window" (nothing else knows yet, we raise SIGTERM ourselves) from "a
-// signal already started the shutdown" (raising a second one would hit
-// app.cpp's own two-signal "Forced exit" path on a shutdown already in
-// progress).
-std::atomic<bool> g_shutdown_from_signal{false};
-WindowBackend*     g_window = nullptr;
-std::mutex         g_window_mutex;
-
-// Backs the `window` LuxScript module's callable functions
-// (window.minimize(), window.open_file()...) -- see
-// vendor/lux/src/lux_script/modules/window.cpp and window_control.hpp.
-// Every hook grabs g_window under the lock and releases it before doing
-// anything that might block (pick_file can wait on the user for a while),
-// so a slow file dialog never holds up set_title()/minimize()/etc.
-void install_window_control_hooks() {
-    auto& ctl = lux_script::window_control();
-    ctl.set_title = [](const std::string& title) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_title(title);
-    };
-    ctl.minimize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->minimize();
-    };
-    ctl.maximize = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->maximize();
-    };
-    ctl.restore = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->restore();
-    };
-    ctl.close = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->terminate();
-    };
-    ctl.fullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->fullscreen();
-    };
-    ctl.unfullscreen = [] {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->unfullscreen();
-    };
-    ctl.set_always_on_top = [](bool on_top) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_always_on_top(on_top);
-    };
-    ctl.pick_file = [](const std::string& suggested_name, bool save_mode) -> std::string {
-        WindowBackend* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->pick_file(suggested_name, save_mode) : std::string();
-    };
-    ctl.pick_folder = []() -> std::string {
-        WindowBackend* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->pick_folder() : std::string();
-    };
-    ctl.notify = [](const std::string& title, const std::string& body) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->notify(title, body);
-    };
-    ctl.set_menu = [](const lux_script::Value& spec) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_menu(spec);
-    };
-    ctl.set_tray = [](const std::string& icon_path, const std::string& tooltip) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->set_tray(icon_path, tooltip);
-    };
-    ctl.clipboard_read = []() -> std::string {
-        WindowBackend* w;
-        {
-            std::lock_guard<std::mutex> lk(g_window_mutex);
-            w = g_window;
-        }
-        return w ? w->clipboard_read() : std::string();
-    };
-    ctl.clipboard_write = [](const std::string& text) {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        if (g_window) g_window->clipboard_write(text);
-    };
 }
 
 // Binds to loopback with port 0 (the OS picks a free ephemeral port), reads
@@ -311,6 +220,7 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
         << "Exec=\"" << exe_path << "\"\n"
         << "Terminal=false\n"
         << icon_line
+        << "StartupWMClass=" << fs::path(exe_path).filename().string() << "\n"   // = WM_CLASS (the program name)
         << "Categories=Utility;\n";
     out.close();
 
@@ -443,6 +353,10 @@ int main(int argc, char** argv) {
     opts.dark      = wcfg.dark;
     opts.devtools  = wcfg.devtools;
     opts.icon      = wcfg.icon;
+    {   // WM_CLASS as GTK/WebKit would set it (the program name), so the desktop matches the window to its .desktop file
+        const std::string a0 = argv[0] ? argv[0] : "";
+        opts.wm_class = a0.substr(a0.find_last_of('/') == std::string::npos ? 0 : a0.find_last_of('/') + 1);
+    }
     // A size the user already resized to on a previous run wins over the
     // window: block's own defaults -- those are a first-launch default,
     // not something to snap back to every time.

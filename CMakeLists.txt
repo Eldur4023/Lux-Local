@@ -241,7 +241,7 @@ function(add_lux_desktop_app name)
         add_executable(${name} src/runtime.cpp src/desktop_window.cpp ${_lux_main} ${_generated})
         target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
         if(LUX_DESKTOP_LUXIUM AND UNIX AND NOT APPLE)
-            target_sources(${name} PRIVATE src/luxium_window.cpp)
+            target_sources(${name} PRIVATE src/luxium_window.cpp src/sni_tray.cpp)
             target_compile_definitions(${name} PRIVATE LUXDESKTOP_LUXIUM=1)
         endif()
         _lux_desktop_link(${name})
@@ -257,9 +257,16 @@ add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 # ── Dev mode (src/dev.cpp) ───────────────────────────────────────────────
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own
 # compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
-# template or a static file. Run ./build/app-dev while you work.
-# Not built by default: src/dev.cpp still targets the pre-merge vendor API (set_templates, DesktopWindow::reload).
-add_executable(app-dev EXCLUDE_FROM_ALL src/dev.cpp src/desktop_window.cpp)
+# template or a static file. Run ./build/app-dev while you work. POSIX desktop only.
+if(NOT WIN32 AND NOT ANDROID)
+set(_lux_dev_main ${CMAKE_CURRENT_SOURCE_DIR}/vendor/lux/src/lux_script/main.cpp)
+add_executable(app-dev src/dev.cpp src/desktop_window.cpp ${_lux_dev_main})
 target_compile_definitions(app-dev PRIVATE
     LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
+if(LUX_DESKTOP_LUXIUM AND UNIX AND NOT APPLE)
+    target_sources(app-dev PRIVATE src/luxium_window.cpp src/sni_tray.cpp)
+    target_compile_definitions(app-dev PRIVATE LUXDESKTOP_LUXIUM=1)
+endif()
+target_include_directories(app-dev PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 _lux_desktop_link(app-dev)
+endif()

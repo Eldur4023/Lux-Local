@@ -38,6 +38,7 @@ public:
     // how the hooks get wired up. All thread-safe: a route handler calling
     // these runs on an event-loop or blocking_pool thread, never the
     // window's own.
+    void reload() override;
     void set_title(const std::string& title) override;
     void minimize() override;
     void maximize() override;
