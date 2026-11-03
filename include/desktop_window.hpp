@@ -4,6 +4,8 @@
 
 #include <lux_script/value.hpp>
 
+#include "window_backend.hpp"
+
 // Thin wrapper over the vendored webview.h C API (third_party/webview/webview.h)
 // -- a single header wrapping WebKitGTK, no Chromium/Node bundled, nothing to
 // download. Lux itself is untouched: this project only depends on it as a
@@ -13,20 +15,12 @@
 // LuxScript itself works with) rather than a parallel C++ menu-description
 // type: window.cpp (vendor/lux) hands it over as-is, and building the
 // actual GtkMenu from it is entirely this class's job.
-class DesktopWindow {
+class DesktopWindow final : public WindowBackend {
 public:
-    struct Options {
-        std::string title     = "Lux Desktop";
-        int         width     = 1024;
-        int         height    = 768;
-        bool        resizable = true;
-        bool        dark      = false;
-        bool        devtools  = false;
-        std::string icon;             // path to an image file, or empty for none
-    };
+    using Options = WindowOptions;
 
     explicit DesktopWindow(Options opts);
-    ~DesktopWindow();
+    ~DesktopWindow() override;
 
     DesktopWindow(const DesktopWindow&)            = delete;
     DesktopWindow& operator=(const DesktopWindow&) = delete;
@@ -34,57 +28,57 @@ public:
     // Points the window at the given URL and blocks the calling thread,
     // pumping the native GTK loop, until the window is closed. Must be
     // called from the same thread that constructed this object.
-    void run(const std::string& url);
+    void run(const std::string& url) override;
 
     // Thread-safe: makes run() return, as if the user had closed the window.
-    void terminate();
+    void terminate() override;
 
     // The rest back the `window` LuxScript module (vendor/lux/src/lux_script/
     // modules/window.cpp) via WindowControl -- see runtime.cpp for
     // how the hooks get wired up. All thread-safe: a route handler calling
     // these runs on an event-loop or blocking_pool thread, never the
     // window's own.
-    void set_title(const std::string& title);
-    void minimize();
-    void maximize();
-    void restore();
-    void fullscreen();
-    void unfullscreen();
-    void set_always_on_top(bool on_top);
+    void set_title(const std::string& title) override;
+    void minimize() override;
+    void maximize() override;
+    void restore() override;
+    void fullscreen() override;
+    void unfullscreen() override;
+    void set_always_on_top(bool on_top) override;
 
     // Blocking: shows a native file chooser and waits for it to close.
     // Returns the chosen path, or "" if the user canceled. Must be called
     // from a thread that can afford to block (window.open_file()/
     // save_file() are `is_async`, so that is always true here).
-    std::string pick_file(const std::string& suggested_name, bool save_mode);
+    std::string pick_file(const std::string& suggested_name, bool save_mode) override;
     // Same, as a folder chooser.
-    std::string pick_folder();
+    std::string pick_folder() override;
 
 
     // A freedesktop desktop notification, sent over the session D-Bus
     // directly (org.freedesktop.Notifications) -- not a libnotify
     // dependency, GLib/GIO already ships with GTK3. Thread-safe: GDBus is,
     // by its own documentation, safe to call from any thread.
-    void notify(const std::string& title, const std::string& body);
+    void notify(const std::string& title, const std::string& body) override;
 
     // Native menu bar. Rebuilds the window's whole content (menu bar +
     // webview stacked in a box) the first time this is called -- see
     // desktop_window.cpp's comment on webview.h's own widget layout. An
     // item's optional "accel" (GTK accelerator syntax, e.g. "<Control>q")
     // binds a window-wide keyboard shortcut to it.
-    void set_menu(const lux_script::Value& spec);
+    void set_menu(const lux_script::Value& spec) override;
 
     // System tray icon (GtkStatusIcon -- deprecated since GTK 3.14 but
     // still functional, and the only tray API GTK3 ships without adding a
     // separate libappindicator dependency; see desktop_window.cpp).
     // Left-click toggles the window's visibility.
-    void set_tray(const std::string& icon_path, const std::string& tooltip);
+    void set_tray(const std::string& icon_path, const std::string& tooltip) override;
 
     // The system clipboard (X11 CLIPBOARD selection via GtkClipboard), not
     // the webview's own `navigator.clipboard`. Both are quick, bounded
     // local X11 round-trips, same threading posture as notify().
-    std::string clipboard_read();
-    void        clipboard_write(const std::string& text);
+    std::string clipboard_read() override;
+    void        clipboard_write(const std::string& text) override;
 
     // The window's own size as of its last resize -- kept up to date by a
     // "configure-event" handler connected at construction time rather than
@@ -92,8 +86,8 @@ public:
     // may already be torn down (its own "destroy" signal is what stops the
     // loop run() is blocking on). The caller (runtime.cpp) reads
     // these right after run() returns to persist the size for next launch.
-    int last_width()  const { return last_width_.load();  }
-    int last_height() const { return last_height_.load(); }
+    int last_width()  const override { return last_width_.load();  }
+    int last_height() const override { return last_height_.load(); }
 
 private:
     std::string pick(const std::string& suggested_name, bool save_mode, bool folder);

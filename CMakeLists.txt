@@ -103,6 +103,10 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# Linux: use a window of the shared Luxium app host (one Luxium process for every Lux Desktop app) when
+# Luxium is installed, falling back to GTK + WebKitGTK at runtime when it is not. OFF = WebKitGTK only.
+option(LUX_DESKTOP_LUXIUM "Linux: open app windows in the shared Luxium host when available" ON)
+
 # ── Window shell ──────────────────────────────────────────────────────────
 # Desktop: GTK3 + WebKitGTK via the vendored webview.h. Android: no native window at all -- the Kotlin side
 # hosts a WebView and this project builds only libluxlocal.so (src/android.cpp + boot.cpp). respack runs
@@ -236,6 +240,10 @@ function(add_lux_desktop_app name)
     else()
         add_executable(${name} src/runtime.cpp src/desktop_window.cpp ${_lux_main} ${_generated})
         target_compile_definitions(${name} PRIVATE LUXDESKTOP_APP_ID="${APP_ID}")
+        if(LUX_DESKTOP_LUXIUM AND UNIX AND NOT APPLE)
+            target_sources(${name} PRIVATE src/luxium_window.cpp)
+            target_compile_definitions(${name} PRIVATE LUXDESKTOP_LUXIUM=1)
+        endif()
         _lux_desktop_link(${name})
     endif()
 endfunction()

@@ -47,6 +47,23 @@ happens inside `app/`.
    the window (or `CTRL+C`) shuts the server down and deletes the temp
    directory.
 
+## Linux: windows in a shared Luxium
+
+On Linux the window is, by default, a window of the **Luxium app host**
+(`luxium --host`, [Luxium](https://github.com/Eldur4023/Luxium)): every Lux
+Desktop app on the machine shares ONE Chromium process, each app gets its own
+chrome-less window and its own private profile (localStorage/cookies are keyed
+by the app id). `src/luxium_window.cpp` speaks the host's line-JSON protocol
+(`Luxium/docs/HOST.md`) over `$XDG_RUNTIME_DIR/luxium/host.sock`, starting the host
+if it is not running. Luxium is found through `LUXIUM_BIN`, then `PATH`, then
+`~/.local/opt/luxium/luxium` (`Luxium/tools/install.sh`). If it is not found, or
+`LUX_DESKTOP_BACKEND=webkit` is set, the GTK + WebKitGTK window is used as before;
+build without the Luxium backend with `-DLUX_DESKTOP_LUXIUM=OFF`. Windows and Android are untouched.
+
+Differences on the Luxium backend: `window.set_menu()` and `window.set_tray()` are
+no-ops (warned once on stderr); file pickers use `zenity` and notifications
+`notify-send`; `devtools true` gives F12 (a second window) instead of WebKit's inspector.
+
 ## The window: block
 
 ```lux

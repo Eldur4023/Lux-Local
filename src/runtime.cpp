@@ -9,6 +9,9 @@
 // CMakeLists.txt: this file has nothing app-specific in it.
 #include "extract.hpp"
 #include "desktop_window.hpp"
+#ifdef LUXDESKTOP_LUXIUM
+#include "luxium_window.hpp"
+#endif
 
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
@@ -33,6 +36,7 @@
 #include <csignal>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -70,7 +74,7 @@ fs::path u8path(const std::string& s) {
 // app.cpp's own two-signal "Forced exit" path on a shutdown already in
 // progress).
 std::atomic<bool> g_shutdown_from_signal{false};
-DesktopWindow*     g_window = nullptr;
+WindowBackend*     g_window = nullptr;
 std::mutex         g_window_mutex;
 
 // Backs the `window` LuxScript module's callable functions
@@ -114,7 +118,7 @@ void install_window_control_hooks() {
         if (g_window) g_window->set_always_on_top(on_top);
     };
     ctl.pick_file = [](const std::string& suggested_name, bool save_mode) -> std::string {
-        DesktopWindow* w;
+        WindowBackend* w;
         {
             std::lock_guard<std::mutex> lk(g_window_mutex);
             w = g_window;
@@ -122,7 +126,7 @@ void install_window_control_hooks() {
         return w ? w->pick_file(suggested_name, save_mode) : std::string();
     };
     ctl.pick_folder = []() -> std::string {
-        DesktopWindow* w;
+        WindowBackend* w;
         {
             std::lock_guard<std::mutex> lk(g_window_mutex);
             w = g_window;
@@ -142,7 +146,7 @@ void install_window_control_hooks() {
         if (g_window) g_window->set_tray(icon_path, tooltip);
     };
     ctl.clipboard_read = []() -> std::string {
-        DesktopWindow* w;
+        WindowBackend* w;
         {
             std::lock_guard<std::mutex> lk(g_window_mutex);
             w = g_window;
@@ -430,7 +434,8 @@ int main(int argc, char** argv) {
     const lux_script::WindowConfig& wcfg = lux_script::window_config();
     std::string app_id = sanitize_id(resolve_display_name(mod));
 
-    DesktopWindow::Options opts;
+    WindowOptions opts;
+    opts.app_id    = app_id;
     opts.title     = resolve_display_name(mod);
     opts.width     = wcfg.width;
     opts.height    = wcfg.height;
@@ -443,10 +448,16 @@ int main(int argc, char** argv) {
     // not something to snap back to every time.
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    std::optional<DesktopWindow> window(std::in_place, opts);
+    // Linux: a window in the shared Luxium host when Luxium is installed (LUX_DESKTOP_BACKEND=webkit
+    // forces the GTK + WebKitGTK window); otherwise, and on every other platform, the native webview.
+    std::unique_ptr<WindowBackend> window;
+#ifdef LUXDESKTOP_LUXIUM
+    if (LuxiumWindow::available()) window = std::make_unique<LuxiumWindow>(opts);
+#endif
+    if (!window) window = std::make_unique<DesktopWindow>(opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &*window;
+        g_window = window.get();
     }
     install_window_control_hooks();
     // An app that guards its local API with a secret keeps it in `api-token` (mode 600) in its work dir; the page
