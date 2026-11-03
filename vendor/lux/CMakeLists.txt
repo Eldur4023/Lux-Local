@@ -221,9 +221,24 @@ add_library(lux_script STATIC
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
     src/lux_script/tiny_regex.cpp
+    src/lux_script/luxp_serve.cpp
+    src/lux_script/luxp_template.cpp
+    # .luxp: Luxium's application format -- translator, codecs, verifier.
+    # Owned here; Luxium vendors src/luxp/ (its tools/sync_from_lux.sh).
+    src/luxp/dom/node.cpp
+    src/luxp/html/tokenizer.cpp
+    src/luxp/html/parser.cpp
+    src/luxp/style/selector.cpp
+    src/luxp/style/stylesheet.cpp
+    src/luxp/page/doc_codec.cpp
+    src/luxp/page/doc_template.cpp
+    src/luxp/page/luxp.cpp
+    src/luxp/script/bytecode_io.cpp
+    src/luxp/script/page_compile.cpp
     ${LUX_MODULE_SOURCES}
 )
-target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
 if(WIN32)
     target_compile_definitions(lux_script PUBLIC LUX_NO_NATIVE)
@@ -561,6 +576,12 @@ add_test(NAME pdf
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(pdf PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
+# Orderly shutdown: idle keep-alive connections must not hold it up (fix in App's drain).
+add_test(NAME shutdown
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shutdown.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(shutdown PROPERTIES TIMEOUT 120)
+
 # The `http` native module needs libcurl (LUX_HTTP) -- same skip-if-missing
 # pattern as pdf/sqlite/postgres/mysql above.
 add_test(NAME http
@@ -597,5 +618,8 @@ if(LUX_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
         get_filename_component(name ${src} NAME_WE)
         add_executable(${name} ${src})
         target_link_libraries(${name} PRIVATE lux)
+        if(WIN32)
+            target_link_options(${name} PRIVATE -Wl,--allow-multiple-definition)  # see lux_link_script()
+        endif()
     endforeach()
 endif()

@@ -184,6 +184,8 @@ app:
     version   "1.0.0"
     port      8080
     host      "127.0.0.1"     # listen address; default 0.0.0.0
+    tls_cert  "fullchain.pem" # with tls_key: the port speaks HTTPS (needs -DLUX_TLS=ON)
+    tls_key   "privkey.pem"
     max_body  "16MB"          # request body cap (see §16 for bigger uploads)
     templates "./templates"
 
@@ -648,6 +650,53 @@ Range Not Satisfiable`; one whose END is past the end is clamped to the last rea
 — that is a normal request, not an error. A `Range` header with several ranges
 (`bytes=0-99,200-299`) or one this cannot parse at all is not an error either: the file is
 served in full, exactly as if the header had never arrived.
+
+### Pages for Luxium (`.luxp`)
+
+[Luxium](../Luxium) is the browser that runs LuxScript instead of JavaScript. It does not
+read your HTML: it reads `.luxp`, pages already compiled into its own structures (DOM tree,
+parsed stylesheets, verified LuxScript bytecode). Lux produces them:
+
+```lux
+get endpoint("/hello", string who = "Ana"):
+    return render("hello.html", who=who)    # nothing to change
+```
+
+The same route answers `application/x-luxp` when the request says
+`Accept: application/x-luxp` (Luxium does), and `text/html` to every other browser —
+`Vary: Accept` on both. `{{ }}` keeps working anywhere, inside the page's
+`<script type="text/luxscript">` too. Its `<link rel="stylesheet">`, `@import` and `url()`
+resolve through your `static` mounts, the way a browser would request them.
+
+How much a request costs depends on the template:
+
+- **A template whose `{{ }}` and `{% %}` sit where the page's structure does not depend on
+  them** (text, quoted attributes, loops and conditions that open and close under the same
+  element) is compiled to `.luxp` **once, at startup**, into a document with holes. A request
+  only fills the holes: no HTML parsing, no CSS parsing, no compiling, no compression.
+- **Any other template** (`|safe`, a value in an unquoted attribute or inside a `<script>`,
+  a tag split by an `{% if %}`, a loop that creates its own `<tbody>`) has its filled HTML
+  translated per request. Its script and stylesheet are compiled once and cached.
+- `render()` with constant data is rendered and translated at startup.
+- A page with JavaScript is always answered HTML (Luxium hands it to Chromium).
+- The LuxScript of a template's `<script type="text/luxscript">` is compiled by
+  `lux --check`, against the browser's API: an error is reported at the `render()` that uses
+  the template, with the template's line. A script that interpolates `{{ }}` can only compile
+  once rendered: if it fails, that request is answered HTML and the log says why.
+
+Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
+computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
+plans off.
+
+A static site, without a server:
+
+```
+lux pack site/index.html app.luxp    # every local page it links to, their CSS and images
+```
+
+It fails on any LuxScript error, a missing stylesheet or image, a page that needs JavaScript,
+or a file outside the working directory. The format and its guarantees: Luxium's
+`docs/LUXP.md`.
 
 ### There is no `Response` type
 
@@ -1145,7 +1194,8 @@ routes and their stream.
 **`origins(...)` is required**, and leaving it out is a compile error. Browsers do not apply
 the same-origin policy to the WebSocket handshake: without an allowlist, any site can open
 the connection from your user's browser and inherit their cookies. An origin outside the list
-gets a `403`.
+gets a `403`. `origins("*")` is the explicit opt-in to accept any origin
+(public, cookie-less endpoints only).
 
 ### Broadcasting to a room
 
@@ -1922,6 +1972,7 @@ The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still wor
 | `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
 | `disk_usage(path)` | `{total, free, used}` bytes of the filesystem holding `path` |
 | `chmod(path, mode)` `umask(mask)` | Modes are octal strings (`"640"`); `umask` returns the previous mask |
+| `name()` | `"windows"`, `"linux"`, `"android"` or `"macos"`: the platform the binary was built for |
 | `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
 | **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
 | **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |
@@ -2071,6 +2122,38 @@ failure raises). `attachments` is a `List` of file paths or `{name, content}` fo
 on the spot (`{"name": "report.csv", "content": csv.write(rows)}`), up to 25 MB. `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
 the mail carries both. Every header value is stripped of line breaks, so a form field cannot
 add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
+
+**Several accounts.** A `smtp` Dict in the message replaces the `app:` block for that call:
+`"smtp": {"host", "port", "user", "password" or "token" (OAuth2 access token), "tls", "from"}`.
+`in_reply_to` and `references` set the threading headers. **`compose(d)`** takes the same Dict
+and returns the finished message as text instead of sending it (to save it with `imap.append`).
+
+### imap
+
+Reads mail over IMAP (libcurl, like `mail`). Stateless: every call carries its own connection
+Dict, so one app can serve any number of accounts. Folder names are passed as the server spells
+them; CR/LF in any value is rejected.
+
+```lux
+import imap
+
+Json c = { "host": "imap.example.com", "user": "me", "password": pw }   # tls "tls" (993) | "starttls" | "none"
+Json g = { "host": "imap.gmail.com", "user": "me@gmail.com", "token": access_token }  # OAuth2 (XOAUTH2)
+
+List folders = await imap.list_folders(c)           # [{name, attrs: ["\\Sent", ...]}]
+Json st      = await imap.status(c, "INBOX")        # {messages, uidnext, uidvalidity, unseen}
+List msgs    = await imap.uids(c, "INBOX", 1200)    # [{uid, flags}] for uid >= 1200
+string raw   = await imap.fetch(c, "INBOX", 1203)   # whole RFC 822 message; a 4th arg "HEADER" = headers only
+await imap.set_flags(c, "INBOX", 1203, "add", ["\\Seen"])   # "add" | "remove" | "set"
+await imap.move(c, "INBOX", 1203, "Trash")          # UID MOVE, or copy + \Deleted + UID EXPUNGE
+await imap.append(c, "Sent", mail.compose({...}))   # saved as \\Seen; the new uid is not returned (see find)
+int uid = await imap.find(c, "Drafts", "<id@host>") # uid of the message with that Message-ID header, or 0
+await imap.remove(c, "Drafts", uid)                 # \\Deleted + UID EXPUNGE
+```
+
+`mail.compose({..., "draft": true})` builds a message with no recipient or body yet and keeps its Bcc, for
+saving to Drafts. A new connection is made per call; no IDLE (poll `status`/`uids` on a timer). Test:
+`tests/run_imap.sh` (against `tests/imap_fake_server.py`).
 
 ---
 

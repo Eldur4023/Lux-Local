@@ -1,4 +1,5 @@
 #include <lux_script/template.hpp>
+#include <lux_script/luxp_serve.hpp>
 #include <lux_script/platform_os.hpp>
 
 #include <lux_script/emitter.hpp>
@@ -547,7 +548,9 @@ bool compile_template(const std::string& source, const std::string& file,
                         const std::vector<TypedName>& data,
                         DiagnosticBag& diags, Template& out, const TemplateEnv& env) {
     Compiler c(dir, diags, out, env);
-    return c.compile(source, file, data);
+    if (!c.compile(source, file, data)) return false;
+    luxp_attach_plan(out);   // a .luxp plan, if the template allows one (luxp_template.cpp)
+    return true;
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────

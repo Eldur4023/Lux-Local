@@ -72,6 +72,7 @@ compiles() {
 # every test still passes (same results), so only this notices.
 native_compiles() {
     local name="$1" fich="$2" want="$3" got
+    [ "$IS_WIN" = 1 ] && { skip "$name" "skipped: --native is off on Windows"; return; }
     got=$(cd "$TMP" && "$LUX" --native --check "$fich" 2>&1)
     local n
     n=$(printf '%s' "$got" | sed -n 's/.* \([0-9]*\) route(s) compiled to native code.*/\1/p')
@@ -306,6 +307,13 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 -H "Connection: Upgr
        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: http://t.test" \
        "http://127.0.0.1:$PORT/live/chat?token=$signed")
 [ "$code" = 101 ] && ok "and upgrades with a good token" || fail "and upgrades with a good token" 101 "$code"
+for spec in "/live/chat|http://evil.test|403|ws origin outside the allowlist is 403" "/live/any|http://evil.test|101|ws origins(\"*\") accepts any origin"; do
+    IFS='|' read -r wp wo want wn <<<"$spec"
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+           -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $wo" \
+           "http://127.0.0.1:$PORT$wp?token=$signed")
+    [ "$code" = "$want" ] && ok "$wn" || fail "$wn" "$want" "$code"
+done
 
 echo "== database =="
 rm -f "$HERE/cases/tests-suite.db"*
@@ -382,6 +390,7 @@ if [ "$timeouts" = "b'HTTP/1.1 200' b'HTTP/1.1 408'" ]; then ok "keep-alive idle
 else fail "keep-alive idle past 5s stays open; a partial request gets 408" "b'HTTP/1.1 200' b'HTTP/1.1 408'" "$timeouts"; fi
 check "zip.create writes the archive" GET /zip/create 200 '"n":2'
 zip_path=$(curl -sS "http://127.0.0.1:$PORT/zip/create" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+[ "$IS_WIN" = 1 ] && zip_path=$(winepath -u "$zip_path")
 zip_check=$(python3 -c "
 import zipfile, sys
 z = zipfile.ZipFile(sys.argv[1])
@@ -394,6 +403,7 @@ rm -rf "$(dirname "$zip_path")"
 if [ "$zip_check" = "ok" ]; then ok "zip archive is valid, names are sanitised"
 else fail "zip archive is valid, names are sanitised" "ok" "$zip_check"; fi
 zip_path=$(curl -sS --max-time 30 "http://127.0.0.1:$PORT/zip/many" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+[ "$IS_WIN" = 1 ] && zip_path=$(winepath -u "$zip_path")
 zip_check=$(python3 -c "
 import zipfile, sys
 z = zipfile.ZipFile(sys.argv[1])
@@ -435,8 +445,8 @@ check "os.path_join/basename/dirname" GET /os/path                200 '"joined":
 check "os file round-trip"         GET /os/file_roundtrip         200 '"content":"hola mundo"'
 check "os file round-trip cleans up" GET /os/file_roundtrip       200 '"removed":true,"exists_after":false'
 check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"content_is_null":true'
-check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
-check "os.run exit status"         GET /os/run_echo               200 '"status":0'
+posix_check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
+posix_check "os.run exit status"         GET /os/run_echo               200 '"status":0'
 check "os.run missing command errors" GET /os/run_missing         500 '"error":"os.run(): could not start'
 
 check "os.is_dir/is_file tell a directory from a file" GET /os/stat 200 '"dir_is_dir":true,"dir_is_file":false,"file_is_dir":false,"file_is_file":true'
@@ -457,12 +467,17 @@ check "os.move renames a file"                           GET /os/move_file 200 '
 check "os.move moves a whole directory tree"             GET /os/move_dir 200 '"moved":true,"src_gone":true,"content":"nested"'
 check "os.move on a missing source is rejected"          GET /os/move_missing_source_rejected 500 'does not exist'
 
-check "os.run input/cwd/env"         GET /os/run_options 200 '"stdin":"fed through stdin","cwd":"/tmp\n","env":"set\n"'
-check "a failed await is catchable (os.run timeout_ms)" GET /os/run_options 200 '"timeout":"os.run(): '"'"'sleep'"'"' timed out after 100ms"'
+posix_check "os.run input/cwd/env"         GET /os/run_options 200 '"stdin":"fed through stdin","cwd":"/tmp\n","env":"set\n"'
+posix_check "a failed await is catchable (os.run timeout_ms)" GET /os/run_options 200 '"timeout":"os.run(): '"'"'sleep'"'"' timed out after 100ms"'
 check "os.append_file/glob/list_dir(recursive)" GET /os/files_more 200 '"appended":"one+two","glob":['
 check "os.list_dir recursive is relative" GET /os/files_more 200 '"tree":["a.txt","b.JPG","sub","sub/c.txt"]'
 check "os.mime/path_ext/temp_file"    GET /os/files_more 200 '"mime":"image/jpeg","mime_unknown":"application/octet-stream","ext":".gz","tmp_ok":true'
-check "proc stdin pipe + write"       GET /proc/stdin 200 '"written":4,"echo":"ping","code":0'
+if [ "$IS_WIN" = 1 ]; then
+check "os.run runs a Windows program (cmd /c)" GET /os/run_win 200 '"stdout":"hello from os.run\r\n"'
+check "os.run cwd/env on Windows"              GET /os/run_win_opts 200 '"stdout":"set\r\nC:\\windows\r\n"'
+check "proc.kill + wait on Windows"            GET /proc/win_kill 200 '"was_alive":true'
+fi
+posix_check "proc stdin pipe + write"       GET /proc/stdin 200 '"written":4,"echo":"ping","code":0'
 check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
 check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'
 check "math.sqrt/pow/log"          GET /math/basic  200 '"sqrt":4.0,"pow":1024.0,"log":0.0'
@@ -505,9 +520,9 @@ else fail "rooms: join, broadcast_others (JSON), count, leave on close" "ok" "$r
 sse_rooms_out=$(python3 "$HERE/sse_rooms_check.py" "$PORT" 2>&1 | tail -1)
 if [ "$sse_rooms_out" = "ok" ]; then ok "rooms: sse streams in a room get broadcasts"
 else fail "rooms: sse streams in a room get broadcasts" "ok" "$sse_rooms_out"; fi
-check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
+posix_check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
 check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
-check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
+posix_check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
 check "proc.kill + wait leaves it not alive"           GET /proc/kill_and_wait    200 '"still_alive":false'
 check "proc.read without stdout: pipe is an error" GET /proc/read_without_pipe 500 '"error":"proc.read(): this process was not started with stdout'
 check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
@@ -587,6 +602,57 @@ check "records: two shapes stay Dicts"       GET /records_mixed 200 '[{"a":1},{"
 check "records: a reused slot is not one"   GET /records_slot 200 '{"x":1}'
 check "records: ...and its own branch is"    GET '/records_slot?c=1' 200 '[{"a":1}]'
 
+echo "== .luxp: render() for Luxium (luxp.lux) =="
+export LUX_LUXP_CHECK=1   # the server compares every plan answer with translating its HTML
+next_server "$HERE/cases/luxp.lux" || exit 1
+# check_luxp <name> <path> <bytes>: asked with Accept: application/x-luxp,
+# the answer is a .luxp holding <bytes> and no HTML/CSS/LuxScript source.
+check_luxp() {
+    local name="$1" path="$2" needle="$3" ct
+    ct=$(curl -sS --max-time 10 -H "Accept: application/x-luxp" -o "$TMP/body" \
+         -w '%{content_type}' "http://127.0.0.1:$PORT$path" 2>/dev/null)
+    if [ "$ct" != "application/x-luxp" ]; then
+        fail "$name" "Content-Type application/x-luxp" "$ct — $(head -c 120 "$TMP/body")"; return
+    fi
+    python3 "$HERE/luxp_dump.py" "$TMP/body" > "$TMP/dump" 2>/dev/null
+    if grep -qaF "$needle" "$TMP/dump" && ! grep -qaF "<html" "$TMP/dump"
+    then ok "$name"; else fail "$name" "a .luxp holding '$needle', no HTML source" "$(head -c 60 "$TMP/body" | cat -v)"; fi
+}
+# check_html <name> <path>: asked for a .luxp, the page comes back as HTML.
+check_html() {
+    local name="$1" path="$2" ct
+    ct=$(curl -sS --max-time 10 -H "Accept: application/x-luxp" -o "$TMP/body" -w '%{content_type}' "http://127.0.0.1:$PORT$path" 2>/dev/null)
+    case "$ct" in text/html*) ok "$name" ;; *) fail "$name" "text/html" "$ct" ;; esac
+}
+check_luxp "render() -> .luxp with the template's data"    '/hello?who=Zoe' 'Zoe'
+check_luxp "{{ }} inside the page's <script>"               '/hello?who=Zoe' 'Hola desde LuxScript, '
+check_luxp "<link> through a static mount, and its @import" '/hello'         'rebeccapurple'
+check_luxp "constant render(): translated at startup"       '/fixed'         'cambiada por LuxScript'
+check "same route, any other browser: HTML" GET '/hello?who=Zoe' 200 '<h1 id="t">Hola Zoe</h1>'
+check_luxp "plan: values in text and attributes"          '/plan?who=Zoe&n=3'   'Item <2> & "co" '"'"'x'"'"
+check_luxp "plan: a loop of zero rows, an empty list"      '/plan?n=0'           'pocos'
+check_luxp "plan: elif branch"                             '/plan?n=2'           'dos'
+check_luxp "plan: a value that looks like markup"          '/plan?who=%3Cb%3E%26amp;&n=1' '<b>&amp;'
+check_luxp "plan: a bigger page"                           '/plan?n=40'          'Item <39>'
+check_luxp "plan: 200 rows (a child count longer than one byte)" '/plan?n=200'   'Item <199>'
+check_luxp "no plan: |safe, answered by translating"       '/raw'                'rawok'
+check_luxp "no plan: unquoted attribute"                   '/unquoted?who=a%20b' 'a b'
+check_luxp "no plan: a tag split by {% if %}"              '/condattr'           'class'
+check_html "a page with JavaScript is HTML"                '/js'
+if grep -q "luxp: a template's plan differs" "$TMP/srv.log"; then fail "plans equal translating their HTML" "no 'plan differs' in the log" "$(grep -m1 'plan differs' "$TMP/srv.log" | head -c 400)"; else ok "plans equal translating their HTML (LUX_LUXP_CHECK)"; fi
+unset LUX_LUXP_CHECK
+fails_to_compile "a page's LuxScript is checked at compile time" "$HERE/cases/bad/luxp_script.lux" "template 'broken.html': line 3: 'n' is declared int"
+
+echo "== browser API: async http/ws/sleep in page scripts (cases/spa) =="
+if "$LUX" pack "$HERE/cases/spa/ok.html" "$TMP/spa.luxp" >/dev/null 2>&1; then ok "a page awaiting http/ws/sleep compiles to .luxp"
+else fail "a page awaiting http/ws/sleep compiles to .luxp" "a .luxp" "$("$LUX" pack "$HERE/cases/spa/ok.html" "$TMP/spa.luxp" 2>&1 | head -3)"; fi
+for n in 1 2 3 4; do
+    want=$(cat "$HERE/cases/spa/bad$n.want")
+    out=$("$LUX" pack "$HERE/cases/spa/bad$n.html" "$TMP/bad.luxp" 2>&1)
+    if [ $? -ne 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "browser API checked at compile time ($want)"
+    else fail "browser API checked at compile time ($want)" "an error containing '$want'" "$(printf '%s' "$out" | head -2)"; fi
+done
+
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
 check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'
@@ -655,7 +721,8 @@ check "state.hit counts a sliding window"   GET /hit 200 '"n":1,"ttl_ok":true'
 check "state.hit counts again"              GET /hit 200 '"n":2'
 check "a List is a list of SQL parameters"  GET /in 200 '"r":[{"name":"n2"}],"e":[]'
 check "sha1, hmac_sha1, base32, totp (RFC vectors)" GET /crypto 200 '"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","hmac":"effcdf6ae5eb2fa2d27416d5f184df9c259a7c79","b32":"MZXW6YTBOI","totp":"287082","verify_bad":false'
-check "argon2 / bcrypt hash and verify"     GET /pw 200 '"a_ok":true,"a_bad":false,"b_ok":true,"b_bad":false,"ref_bcrypt":true'
+if [ "$IS_WIN" = 1 ]; then skip "argon2 / bcrypt hash and verify" "skipped: libargon2 not available on Windows"
+else check "argon2 / bcrypt hash and verify"     GET /pw 200 '"a_ok":true,"a_bad":false,"b_ok":true,"b_bad":false,"ref_bcrypt":true'; fi
 check "IANA time zones with daylight saving" GET /tz 200 '"summer":"14:00","winter":"13:00","dst_day":"2026-03-29 00:00"'
 check "a template calls project fns and modules" GET /tpl 200 '4 KB | 14:00'
 check "send_file adds Content-Disposition"  GET /file 200
@@ -673,6 +740,19 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --data-binary @"$TMP/big.bin" "htt
 [ "$code" = 413 ] && ok "a body over max_body is a 413" || fail "max_body" "413" "$code"
 rm -f "$HERE/cases/wishlist-tests.db"*
 cd "$HERE/.."
+
+echo "== graceful shutdown with an open sse stream =="
+next_server "$HERE/cases/sse_shutdown.lux" /ping || exit 1
+curl -sN --max-time 20 "http://127.0.0.1:$PORT/forever" > "$TMP/sse_open.txt" 2>&1 &
+EXTRA_PIDS="$EXTRA_PIDS $!"
+for _ in $(seq 1 40); do grep -q hello "$TMP/sse_open.txt" 2>/dev/null && break; sleep 0.1; done
+t0=$(date +%s)
+kill -TERM "$SRV"
+for _ in $(seq 1 100); do kill -0 "$SRV" 2>/dev/null || break; sleep 0.1; done
+t1=$(date +%s)
+if kill -0 "$SRV" 2>/dev/null; then fail "SIGTERM with an open sse stream exits promptly" "exit within 10 s" "still running after $((t1 - t0)) s"
+else ok "SIGTERM with an open sse stream exits promptly ($((t1 - t0)) s, not the 30 s grace period)"; fi
+kill_wait $SRV; SRV=""
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 

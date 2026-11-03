@@ -8,16 +8,16 @@ separately, no crate tree to download.
 
 Lux is vendored as plain source under `vendor/lux/` (copied in, not a git
 submodule — no network access needed to build this project once it's
-checked out), taken from the `dev` branch of the main Lux repo, with one
+checked out), taken from the `luxium` branch of the main Lux repo (see
+`vendor/lux/VENDORED` for the exact commit), with one
 documented addition that is NOT in Lux: a `window` module
 (`vendor/lux/src/lux_script/modules/window.cpp`, `window_config.hpp`,
 `window_control.hpp`) using Lux's own drop-in module mechanism, so window
 title/size/theme can be declared from LuxScript itself and a route can open
 file/folder pickers, notifications, the clipboard... This repo is the home of
 that module; apps vendor it from here. Any change to Lux itself is made in the
-main Lux repo (`dev`) and then re-vendored, never edited in `vendor/lux/`.
-Exception, local patches pending upstreaming: `LUX_THREADS` env var (`src/app.cpp`) and the close-idle-keep-alive-on-drain
-shutdown (`tcp_server.*`, `http_connection.*`, ported from Lux commit 706adc1); plus a `gtk_main_quit` guard in
+main Lux repo and then re-vendored, never edited in `vendor/lux/`.
+Exception, local patch pending upstreaming: `LUX_THREADS` env var (`src/app.cpp`); plus a `gtk_main_quit` guard in
 `third_party/webview/webview.h`.
 The desktop shell starts the app with Lux's own `main()` (`lux_main()`, built
 with `LUX_EMBEDDED`) on a thread, so it behaves exactly like `lux ./app`.
