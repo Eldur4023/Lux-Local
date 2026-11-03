@@ -43,13 +43,18 @@ public:
     void set_tray(const std::string& icon_path, const std::string& tooltip) override;   // StatusNotifierItem, in this process
     std::string clipboard_read() override;
     void        clipboard_write(const std::string& text) override;
+    // run() could not get a window (host unreachable/wedged twice, or it refused): see error(); run() returned at once.
+    bool failed() const { return failed_; }
+    std::string error() const { return error_; }
     int last_width()  const override { return last_width_.load(); }
     int last_height() const override { return last_height_.load(); }
 
 private:
     bool send(const std::string& json);          // thread-safe, false if disconnected
-    int  connect_host();                         // connects, spawning the host if needed
+    int  acquire_host();                         // connects to a verified host, spawning/replacing one if needed
     std::string pick(const std::string& suggested_name, bool save_mode, bool folder);
+    bool        failed_ = false;
+    std::string error_;
     int port_ = 0;   // the app server's loopback port (menu actions are POSTed to it)
 
     WindowOptions     opts_;

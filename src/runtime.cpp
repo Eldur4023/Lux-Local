@@ -7,6 +7,7 @@
 // Window title/size come from app/app.lux's own `window:` block (see
 // vendor/lux/src/lux_script/modules/window.cpp), never from here or from
 // CMakeLists.txt: this file has nothing app-specific in it.
+#include "applog.hpp"
 #include "extract.hpp"
 #include "desktop_window.hpp"
 #ifdef LUXDESKTOP_LUXIUM
@@ -34,6 +35,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <csignal>
 #include <fstream>
 #include <iostream>
@@ -230,9 +232,10 @@ int install_desktop(const std::shared_ptr<lux_script::Module>& mod, const fs::pa
 }
 #endif
 
-bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout) {
+// `abort` (optional): the server thread already returned (compile/bind failure), so waiting longer is pointless.
+bool wait_for_server(uint16_t port, std::chrono::milliseconds timeout, const std::atomic<bool>* abort = nullptr) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (std::chrono::steady_clock::now() < deadline && !(abort && abort->load())) {
         sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd != kBadSock) {
             sockaddr_in addr{};
@@ -280,6 +283,8 @@ int main(int argc, char** argv) {
 #ifndef LUXDESKTOP_APP_ID
 #define LUXDESKTOP_APP_ID "app"
 #endif
+    applog::set_app(LUXDESKTOP_APP_ID);
+    applog::log("starting");
     fs::path work_dir = xdg_data_home() / "lux-desktop" / LUXDESKTOP_APP_ID;   // Windows: %APPDATA%\lux-desktop\<id>
     fs::create_directories(work_dir);
     extract_resources(work_dir);
@@ -291,14 +296,14 @@ int main(int argc, char** argv) {
     std::vector<fs::path> inputs;
     std::string error;
     if (!lux_script::resolve_inputs({"."}, inputs, error)) {
-        std::cerr << "luxdesktop: " << error << "\n";
+        applog::dialog_error("The app's sources are broken: " + error);
         return 1;
     }
 
     lux_script::DiagnosticBag diags;
     auto mod = lux_script::compile(inputs, diags);
     if (!diags.empty()) {
-        std::cerr << lux_script::format_errors(diags, mod->files);
+        applog::dialog_error("The app does not compile:\n" + lux_script::format_errors(diags, mod->files));
         return 1;
     }
 
@@ -313,8 +318,7 @@ int main(int argc, char** argv) {
     // It must only ever be reachable from this machine.
     const std::string& host = mod->program.app.host;
     if (host != "127.0.0.1" && host != "localhost" && host != "::1") {
-        std::cerr << "luxdesktop: app.lux must declare `host \"127.0.0.1\"` (found \""
-                  << host << "\"): the UI server is for this machine only.\n";
+        applog::dialog_error("app.lux must declare `host \"127.0.0.1\"` (found \"" + host + "\"): the UI server is for this machine only.");
         return 1;
     }
 
@@ -330,16 +334,23 @@ int main(int argc, char** argv) {
 #else
     ::setenv("LUX_THREADS", "2", 0);
 #endif
-    std::thread server_thread([&lux_argv] {
+    std::atomic<bool> server_exited{false};
+    std::thread server_thread([&lux_argv, &server_exited] {
         lux_main(5, lux_argv);
+        server_exited = true;
         std::lock_guard<std::mutex> lk(g_window_mutex);
         if (g_window) {
             g_shutdown_from_signal.store(true);
             g_window->terminate();
         }
     });
-    if (!wait_for_server(port, std::chrono::milliseconds(5000)))
-        lux::log().warn("server did not come up in time, opening the window anyway");
+    // A cold start compiles the app and opens its database; 30 s is generous. A window onto a dead server is
+    // worse than an error, so a server that never comes up (or already quit) ends the launch visibly.
+    if (!wait_for_server(port, std::chrono::seconds(30), &server_exited)) {
+        applog::dialog_error(server_exited ? "The app's internal server stopped during start-up." : "The app's internal server did not start within 30 seconds.");
+        std::_Exit(1);   // the server thread may be wedged: no join
+    }
+    applog::log("server up on port " + std::to_string(port));
 
     const lux_script::WindowConfig& wcfg = lux_script::window_config();
     std::string app_id = sanitize_id(resolve_display_name(mod));
@@ -366,8 +377,15 @@ int main(int argc, char** argv) {
     // Linux: a window in the shared Luxium host when Luxium is installed (LUX_DESKTOP_BACKEND=webkit
     // forces the GTK + WebKitGTK window); otherwise, and on every other platform, the native webview.
     std::unique_ptr<WindowBackend> window;
+#ifndef _WIN32
+    if (const char* d = std::getenv("DISPLAY"), *w = std::getenv("WAYLAND_DISPLAY"); !(d && *d) && !(w && *w)) {
+        applog::dialog_error("There is no graphical display (DISPLAY is not set), so the window cannot open.");
+        std::_Exit(1);
+    }
+#endif
 #ifdef LUXDESKTOP_LUXIUM
     if (LuxiumWindow::available()) window = std::make_unique<LuxiumWindow>(opts);
+    else applog::log("Luxium window unavailable (luxium binary not found, no X display, or LUX_DESKTOP_BACKEND=webkit): using WebKitGTK");
 #endif
     if (!window) window = std::make_unique<DesktopWindow>(opts);
     {
@@ -384,6 +402,35 @@ int main(int argc, char** argv) {
         if (tok_file >> tok && !tok.empty()) url += "#t=" + tok;
     }
     window->run(url);
+#ifdef LUXDESKTOP_LUXIUM
+    if (auto* lw = dynamic_cast<LuxiumWindow*>(window.get()); lw && lw->failed()) {
+        const std::string why = lw->error();
+#ifndef _WIN32
+        const char* disp = std::getenv("DISPLAY");
+        const char* wl = std::getenv("WAYLAND_DISPLAY");
+        const bool have_display = (disp && *disp) || (wl && *wl);
+#else
+        const bool have_display = true;
+#endif
+        if (!have_display) {
+            applog::dialog_error("Could not open the window: " + why);
+            std::_Exit(1);
+        }
+        applog::log("Luxium window failed (" + why + "); falling back to the WebKitGTK window");
+        {
+            std::lock_guard<std::mutex> lk(g_window_mutex);
+            g_window = nullptr;
+        }
+        window = std::make_unique<DesktopWindow>(opts);
+        {
+            std::lock_guard<std::mutex> lk(g_window_mutex);
+            g_window = window.get();
+        }
+        install_window_control_hooks();
+        window->run(url);
+    }
+#endif
+    applog::log("window closed");
     save_geometry(app_id, window->last_width(), window->last_height());
 
     // Destroy the window before waiting on the server: the webview keeps its
@@ -398,6 +445,13 @@ int main(int argc, char** argv) {
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
+    // The server drains open connections (up to 30 s); the window is already gone, so do not make the user
+    // wait on a stuck drain: hard exit after 10 s.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        applog::log("server did not stop within 10 s, forcing exit");
+        std::_Exit(0);
+    }).detach();
     server_thread.join();
 
     {
