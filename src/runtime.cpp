@@ -353,6 +353,7 @@ int main(int argc, char** argv) {
     opts.dark      = wcfg.dark;
     opts.devtools  = wcfg.devtools;
     opts.icon      = wcfg.icon;
+    opts.engine    = wcfg.engine;
     {   // WM_CLASS as GTK/WebKit would set it (the program name), so the desktop matches the window to its .desktop file
         const std::string a0 = argv[0] ? argv[0] : "";
         opts.wm_class = a0.substr(a0.find_last_of('/') == std::string::npos ? 0 : a0.find_last_of('/') + 1);

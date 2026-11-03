@@ -16,6 +16,7 @@ struct WindowOptions {
     bool        devtools  = false;
     std::string icon;             // path to an image file, or empty for none
     std::string app_id;           // stable id of the app (Luxium keeps one profile per id)
+    std::string engine = "auto"; // Luxium backend: "luxium" own engine, "web" Chromium, "auto" own engine unless the page runs JavaScript
     std::string wm_class;         // X11 WM_CLASS of the Luxium window (match the .desktop file's StartupWMClass); "" = app_id
 };
 

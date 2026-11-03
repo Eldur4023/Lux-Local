@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/file.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -129,6 +131,29 @@ void spawn_host(const std::string& bin, const std::string& dir) {
 
 } // namespace
 
+// The menu item's action route, POSTed to the app's own server from here: own-engine windows run no JavaScript,
+// so the old `eval fetch(...)` through the host is not available (and this works the same for Chromium windows).
+void LuxiumWindow::post_loopback(int port, const std::string& path) {
+    if (port <= 0 || path.empty() || path[0] != '/') return;
+    std::thread([port, path] {
+        int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return;
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(static_cast<uint16_t>(port));
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) {
+            const std::string req = "POST " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
+                                    "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            if (::send(fd, req.data(), req.size(), MSG_NOSIGNAL) > 0) {
+                char buf[512];
+                while (::read(fd, buf, sizeof buf) > 0) {}   // drain: the route has run when the server closes
+            }
+        }
+        ::close(fd);
+    }).detach();
+}
+
 std::string LuxiumWindow::find_binary() {
     std::error_code ec;
     if (const char* e = std::getenv("LUXIUM_BIN"); e && *e) return fs::exists(e, ec) ? e : "";
@@ -203,6 +228,7 @@ int LuxiumWindow::connect_host() {
 }
 
 void LuxiumWindow::run(const std::string& url) {
+    if (size_t c = url.find("://127.0.0.1:"); c != std::string::npos) port_ = std::atoi(url.c_str() + c + 13);
     std::string icon = opts_.icon;
     if (!icon.empty()) { std::error_code ec; icon = fs::absolute(icon, ec).string(); }
     const std::string open =
@@ -211,7 +237,7 @@ void LuxiumWindow::run(const std::string& url) {
         ",\"min_width\":" + std::to_string(std::min(opts_.width, 320)) + ",\"min_height\":" + std::to_string(std::min(opts_.height, 240)) +
         ",\"resizable\":" + (opts_.resizable ? "true" : "false") + ",\"dark\":" + (opts_.dark ? "true" : "false") +
         ",\"devtools\":" + (opts_.devtools ? "true" : "false") + ",\"icon\":" + jq(icon) +
-        ",\"app_id\":" + jq(opts_.app_id.empty() ? "app" : opts_.app_id) +
+        ",\"engine\":" + jq(opts_.engine) + ",\"app_id\":" + jq(opts_.app_id.empty() ? "app" : opts_.app_id) +
         ",\"wm_class\":" + jq(opts_.wm_class.empty() ? (opts_.app_id.empty() ? "app" : opts_.app_id) : opts_.wm_class) + "}";
 
     for (int attempt = 0; attempt < 3 && !stop_; ++attempt) {
@@ -245,7 +271,7 @@ void LuxiumWindow::run(const std::string& url) {
                     const std::string checked = field(line, "checked");
                     if (!url.empty()) {
                         if (!checked.empty()) url += (url.find('?') == std::string::npos ? "?" : "&") + std::string("checked=") + checked;
-                        send("{\"cmd\":\"eval\",\"code\":" + jq("fetch(" + jq(url) + ", {method:'POST'})") + "}");
+                        post_loopback(port_, url);
                     }
                 }
                 else if (ev == "resized") {

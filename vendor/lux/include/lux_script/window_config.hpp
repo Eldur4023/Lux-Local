@@ -21,6 +21,7 @@ struct WindowConfig {
     bool        dark      = false; // GTK dark theme (native menu bar, dialogs)
     bool        devtools  = false;
     std::string icon;             // path, relative to the app's own directory
+    std::string engine = "auto";  // Luxium backend: "luxium" (own engine), "web" (Chromium), "auto" (own engine unless the page runs JavaScript)
 };
 
 WindowConfig& window_config();

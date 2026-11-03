@@ -18,6 +18,7 @@ class LuxiumWindow final : public WindowBackend {
 public:
     // Path of the luxium binary (env LUXIUM_BIN, PATH, ~/.local/opt/luxium/luxium), or "" if none.
     static std::string find_binary();
+    static void post_loopback(int port, const std::string& path);   // POST (no body) to the app's own server
     // Usable here and now: binary found, an X11 display, and not disabled by LUX_DESKTOP_BACKEND=webkit.
     static bool available();
 
@@ -49,6 +50,7 @@ private:
     bool send(const std::string& json);          // thread-safe, false if disconnected
     int  connect_host();                         // connects, spawning the host if needed
     std::string pick(const std::string& suggested_name, bool save_mode, bool folder);
+    int port_ = 0;   // the app server's loopback port (menu actions are POSTed to it)
 
     WindowOptions     opts_;
     int               fd_ = -1;

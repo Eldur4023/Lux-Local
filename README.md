@@ -69,6 +69,21 @@ pickers use `zenity` and notifications `notify-send`; `devtools true` gives F12 
 WebKit's inspector. The window's WM_CLASS is the program name (as GTK sets it) and `--install-desktop` writes it
 as `StartupWMClass`; a hand-written `.desktop` file matches by file name = program name, or add `StartupWMClass=`.
 
+### Which engine draws the window
+
+The Luxium window renders with **Luxium's own engine** (HTML + CSS + LuxScript pages, no JavaScript): no
+Chromium process, no `libcef` mapped; roughly 12 MB per extra app window (WebKitGTK: ~120 MB). Chromium is
+only started, lazily and only for that window, when the page needs JavaScript. `window: engine` picks:
+
+- `"auto"` (default): own engine; if the loaded page runs JavaScript (a `<script>` that is not LuxScript, or
+  `<script src>`) the host hands that window to Chromium. Today's JavaScript-frontend apps (Localify, Mail...)
+  keep working unchanged this way.
+- `"luxium"`: own engine only, JavaScript is never run.
+- `"web"`: Chromium straight away (skips the probe).
+
+Menu actions (`window.set_menu()`) are POSTed to the app's own server by the app process, so they work on every
+engine. `LUX_DESKTOP_BACKEND=webkit` still forces WebKitGTK.
+
 ## The window: block
 
 ```lux
@@ -85,6 +100,7 @@ app:
         height    600
         resizable true
         devtools  false     # true opens WebKit's inspector
+        engine    "auto"    # Luxium backend: "auto" | "luxium" (own engine) | "web" (Chromium)
         icon      "./icon.png"   # path relative to the app's own directory
 ```
 

@@ -177,6 +177,13 @@ public:
             else if (key == "dark")      cfg.dark      = (value == "true");
             else if (key == "devtools")  cfg.devtools  = (value == "true");
             else if (key == "icon")      cfg.icon      = value;
+            else if (key == "engine") {
+                if (value != "auto" && value != "luxium" && value != "web") {
+                    error = "window: engine must be \"auto\", \"luxium\" or \"web\"";
+                    return false;
+                }
+                cfg.engine = value;
+            }
             else { error = "window: unknown option '" + key + "'"; return false; }
         }
         window_config() = cfg;
