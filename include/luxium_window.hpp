@@ -3,8 +3,10 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <mutex>
 
+#include "sni_tray.hpp"
 #include "window_backend.hpp"
 
 // A window in the shared Luxium app host (`luxium --host`): every Lux Desktop
@@ -25,6 +27,7 @@ public:
     void run(const std::string& url) override;
     void terminate() override;
 
+    void reload() override;
     void set_title(const std::string& title) override;
     void minimize() override;
     void maximize() override;
@@ -35,8 +38,8 @@ public:
     std::string pick_file(const std::string& suggested_name, bool save_mode) override;
     std::string pick_folder() override;
     void notify(const std::string& title, const std::string& body) override;
-    void set_menu(const lux_script::Value& spec) override;      // not supported by the host (yet)
-    void set_tray(const std::string& icon_path, const std::string& tooltip) override;   // idem
+    void set_menu(const lux_script::Value& spec) override;      // menu bar drawn by the host
+    void set_tray(const std::string& icon_path, const std::string& tooltip) override;   // StatusNotifierItem, in this process
     std::string clipboard_read() override;
     void        clipboard_write(const std::string& text) override;
     int last_width()  const override { return last_width_.load(); }
@@ -56,6 +59,8 @@ private:
     std::condition_variable res_cv_;
     std::map<int, std::string> results_;
     std::atomic<int>  next_id_{1};
-    bool              menu_warned_ = false;
+    std::string       menu_spec_;                // last set_menu() JSON, resent if the host was not connected yet
+    std::unique_ptr<SniTray> tray_;
+    std::mutex        tray_mutex_;
 };
 #endif

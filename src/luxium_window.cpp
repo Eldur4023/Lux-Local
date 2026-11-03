@@ -161,6 +161,7 @@ LuxiumWindow::LuxiumWindow(WindowOptions opts) : opts_(std::move(opts)) {
 }
 
 LuxiumWindow::~LuxiumWindow() {
+    { std::lock_guard<std::mutex> lk(tray_mutex_); tray_.reset(); }
     if (fd_ >= 0) ::close(fd_);
 }
 
@@ -210,7 +211,8 @@ void LuxiumWindow::run(const std::string& url) {
         ",\"min_width\":" + std::to_string(std::min(opts_.width, 320)) + ",\"min_height\":" + std::to_string(std::min(opts_.height, 240)) +
         ",\"resizable\":" + (opts_.resizable ? "true" : "false") + ",\"dark\":" + (opts_.dark ? "true" : "false") +
         ",\"devtools\":" + (opts_.devtools ? "true" : "false") + ",\"icon\":" + jq(icon) +
-        ",\"app_id\":" + jq(opts_.app_id.empty() ? "app" : opts_.app_id) + "}";
+        ",\"app_id\":" + jq(opts_.app_id.empty() ? "app" : opts_.app_id) +
+        ",\"wm_class\":" + jq(opts_.wm_class.empty() ? (opts_.app_id.empty() ? "app" : opts_.app_id) : opts_.wm_class) + "}";
 
     for (int attempt = 0; attempt < 3 && !stop_; ++attempt) {
         int fd = connect_host();
@@ -231,7 +233,21 @@ void LuxiumWindow::run(const std::string& url) {
                 const std::string line = buf.substr(0, p);
                 buf.erase(0, p + 1);
                 const std::string ev = field(line, "ev");
-                if (ev == "opened") opened = true;
+                if (ev == "opened") {
+                    opened = true;
+                    std::string spec;
+                    { std::lock_guard<std::mutex> lk(send_mutex_); spec = menu_spec_; }
+                    if (!spec.empty()) send("{\"cmd\":\"set_menu\",\"spec\":" + jq(spec) + "}");
+                } else if (ev == "menu") {
+                    // Same delivery as the WebKitGTK backend: the page POSTs the item's action route
+                    // ("?checked=true|false" appended for check items).
+                    std::string url = field(line, "action");
+                    const std::string checked = field(line, "checked");
+                    if (!url.empty()) {
+                        if (!checked.empty()) url += (url.find('?') == std::string::npos ? "?" : "&") + std::string("checked=") + checked;
+                        send("{\"cmd\":\"eval\",\"code\":" + jq("fetch(" + jq(url) + ", {method:'POST'})") + "}");
+                    }
+                }
                 else if (ev == "resized") {
                     last_width_  = std::atoi(field(line, "width").c_str());
                     last_height_ = std::atoi(field(line, "height").c_str());
@@ -257,6 +273,7 @@ void LuxiumWindow::terminate() {
     if (fd_ >= 0) ::shutdown(fd_, SHUT_RD);   // wakes run() even if the host never answers
 }
 
+void LuxiumWindow::reload() { send("{\"cmd\":\"reload\"}"); }
 void LuxiumWindow::set_title(const std::string& t) { send("{\"cmd\":\"set_title\",\"title\":" + jq(t) + "}"); }
 void LuxiumWindow::minimize()   { send("{\"cmd\":\"minimize\"}"); }
 void LuxiumWindow::maximize()   { send("{\"cmd\":\"maximize\"}"); }
@@ -288,11 +305,21 @@ void LuxiumWindow::notify(const std::string& title, const std::string& body) {
     _exit(127);
 }
 
-void LuxiumWindow::set_menu(const lux_script::Value&) {
-    if (!menu_warned_) { menu_warned_ = true; std::cerr << "luxdesktop: window.set_menu() is not supported on the Luxium backend\n"; }
+void LuxiumWindow::set_menu(const lux_script::Value& spec) {
+    const std::string json = spec.to_json_text();
+    { std::lock_guard<std::mutex> lk(send_mutex_); menu_spec_ = json; }
+    send("{\"cmd\":\"set_menu\",\"spec\":" + jq(json) + "}");
 }
-void LuxiumWindow::set_tray(const std::string&, const std::string&) {
-    if (!menu_warned_) { menu_warned_ = true; std::cerr << "luxdesktop: window.set_tray() is not supported on the Luxium backend\n"; }
+
+// Left click toggles the window like the WebKitGTK tray does; the tray's own menu adds Quit.
+void LuxiumWindow::set_tray(const std::string& icon_path, const std::string& tooltip) {
+    std::error_code ec;
+    const std::string icon = icon_path.empty() ? icon_path : fs::absolute(icon_path, ec).string();
+    std::lock_guard<std::mutex> lk(tray_mutex_);
+    if (!tray_)
+        tray_ = std::make_unique<SniTray>(opts_.app_id.empty() ? "app" : opts_.app_id, opts_.title,
+                                          [this] { send("{\"cmd\":\"toggle\"}"); }, [this] { terminate(); });
+    tray_->set(icon, tooltip);
 }
 
 std::string LuxiumWindow::clipboard_read() {

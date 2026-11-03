@@ -60,9 +60,14 @@ if it is not running. Luxium is found through `LUXIUM_BIN`, then `PATH`, then
 `LUX_DESKTOP_BACKEND=webkit` is set, the GTK + WebKitGTK window is used as before;
 build without the Luxium backend with `-DLUX_DESKTOP_LUXIUM=OFF`. Windows and Android are untouched.
 
-Differences on the Luxium backend: `window.set_menu()` and `window.set_tray()` are
-no-ops (warned once on stderr); file pickers use `zenity` and notifications
-`notify-send`; `devtools true` gives F12 (a second window) instead of WebKit's inspector.
+On the Luxium backend `window.set_menu()` draws a menu bar inside the Luxium window (SDL has no native
+menus; same spec, accelerators checked before the page sees the key, same `fetch(action)` delivery, F10 and
+arrows to navigate; no mnemonics). `window.set_tray()` is a StatusNotifierItem
+(`org.kde.StatusNotifierItem` + `com.canonical.dbusmenu`) published by the app process itself: left click toggles
+the window, its menu has Show / Hide and Quit. `dark true` sets the dark title bar hint and the menu colours. File
+pickers use `zenity` and notifications `notify-send`; `devtools true` gives F12 (a second window) instead of
+WebKit's inspector. The window's WM_CLASS is the program name (as GTK sets it) and `--install-desktop` writes it
+as `StartupWMClass`; a hand-written `.desktop` file matches by file name = program name, or add `StartupWMClass=`.
 
 ## The window: block
 
@@ -242,9 +247,10 @@ refuses to start an app that does not declare `host "127.0.0.1"`.
 
 ## Dev mode
 
-There is no separate dev binary any more (the old `app-dev` used a Lux API that no longer exists). For hot reload
-while you work, serve the app with Lux itself and open it in a browser: `./build/vendor/lux/lux app` (the `window`
-module is not available there, so keep window-only calls behind a check or test them in the packaged binary).
+`./build/app-dev` (built by default on Linux) serves `app/` straight off disk: no respack, no rebuild after
+editing. Lux's own watcher recompiles `.lux` files; a second watcher reloads the window when anything under
+`app/` (except `data/`) changes. It uses the Luxium backend when available, WebKitGTK otherwise, and has
+devtools always on. Its Luxium profile is `<id>-dev`, separate from the installed app's.
 
 ## What this is not (yet)
 
