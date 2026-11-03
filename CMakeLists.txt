@@ -250,7 +250,8 @@ add_lux_desktop_app(app DIR ${CMAKE_CURRENT_SOURCE_DIR}/app ID localify)
 # Reads app/ straight off disk and hot-reloads it through LuxScript's own
 # compiler -- no respack, no rebuilding THIS binary after editing app.lux, a
 # template or a static file. Run ./build/app-dev while you work.
-add_executable(app-dev src/dev.cpp src/desktop_window.cpp)
+# Not built by default: src/dev.cpp still targets the pre-merge vendor API (set_templates, DesktopWindow::reload).
+add_executable(app-dev EXCLUDE_FROM_ALL src/dev.cpp src/desktop_window.cpp)
 target_compile_definitions(app-dev PRIVATE
     LUXDESKTOP_APP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/app")
 _lux_desktop_link(app-dev)
