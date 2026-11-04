@@ -20,6 +20,7 @@
 #include <lux_script/window_config.hpp>
 #include <lux_script/window_control.hpp>
 #include <lux/app.hpp>
+#include <lux/cancel.hpp>
 #include <lux/logger.hpp>
 
 #ifdef _WIN32
@@ -334,6 +335,14 @@ int main(int argc, char** argv) {
 #else
     ::setenv("LUX_THREADS", "2", 0);
 #endif
+    // The server drains open connections for up to 30 s after SIGTERM / the window closing, and a half-sent request
+    // keeps it waiting: nobody is going to finish it, so hard exit 10 s after the drain starts.
+    std::thread([] {
+        while (!lux::shutting_down().load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        applog::log("server did not stop within 10 s of the shutdown, forcing exit");
+        std::_Exit(0);
+    }).detach();
     std::atomic<bool> server_exited{false};
     std::thread server_thread([&lux_argv, &server_exited] {
         lux_main(5, lux_argv);
@@ -445,13 +454,6 @@ int main(int argc, char** argv) {
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
-    // The server drains open connections (up to 30 s); the window is already gone, so do not make the user
-    // wait on a stuck drain: hard exit after 10 s.
-    std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-        applog::log("server did not stop within 10 s, forcing exit");
-        std::_Exit(0);
-    }).detach();
     server_thread.join();
 
     {

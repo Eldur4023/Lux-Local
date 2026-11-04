@@ -1,7 +1,6 @@
-Source: Lux @181e01b6669008837c3078f881a7197b5a68b60e, branch stable, 2026-11-03.
+Source: Lux @05fbd3582f940eb414328f34a793fc0817fd146f, branch stable, 2026-11-04.
 Refresh: git -C ../Lux archive origin/stable | tar -x into vendor/lux (after git rm -rq vendor/lux; rm -rf vendor/lux).
 Lux-Local-only files (kept on refresh, NOT in Lux):
   src/lux_script/modules/window.cpp
   include/lux_script/window_config.hpp
   include/lux_script/window_control.hpp
-Local patch pending upstreaming: LUX_THREADS env var in src/app.cpp.

@@ -459,6 +459,7 @@ void LuxiumWindow::run(const std::string& url) {
         ",\"wm_class\":" + jq(opts_.wm_class.empty() ? (opts_.app_id.empty() ? "app" : opts_.app_id) : opts_.wm_class) + "}";
 
     applog::log("opening window " + url);
+    int lost = 0;   // times the host went away under an open window
     for (int attempt = 0; attempt < 3 && !stop_; ++attempt) {
         int fd = acquire_host();
         if (fd < 0) { failed_ = true; applog::log("giving up: " + error_); return; }
@@ -467,7 +468,7 @@ void LuxiumWindow::run(const std::string& url) {
 
         // A healthy host answers `open` with `opened` within moments; a cold Chromium start is the slow case.
         const auto open_deadline = Clock::now() + 15s;
-        bool opened = false, fatal = false, timed_out = false;
+        bool opened = false, fatal = false, timed_out = false, closed = false;
         std::string buf, line;
         for (;;) {
             const int r = read_line(fd, buf, line, opened ? nullptr : &open_deadline);
@@ -499,10 +500,18 @@ void LuxiumWindow::run(const std::string& url) {
             } else if (ev == "error") {
                 applog::log("luxium host: " + field(line, "message"));
                 if (!opened && field(line, "fatal") == "true") { error_ = "the Luxium host could not create the window: " + field(line, "message"); fatal = true; break; }
-            } else if (ev == "closed") break;
+            } else if (ev == "closed") { closed = true; break; }
         }
         { std::lock_guard<std::mutex> lk(send_mutex_); ::close(fd_); fd_ = -1; }
-        if (opened || stop_) return;   // normal end
+        if (stop_ || (opened && closed)) return;   // normal end
+        if (opened) {
+            // EOF with no `closed`: the host died or was replaced (an install, a crash), the user did not close anything.
+            // Reopen in a fresh host rather than vanish silently; give up (WebKitGTK fallback) if it keeps happening.
+            applog::log("lost the connection to the Luxium host");
+            if (++lost > 2) { error_ = "the Luxium host keeps dying"; failed_ = true; return; }
+            --attempt;
+            continue;
+        }
         if (fatal) { failed_ = true; return; }
         if (timed_out) {
             // Still pinging fine with a ticking render loop: just slow, do not disturb its other windows.

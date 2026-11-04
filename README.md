@@ -17,8 +17,8 @@ title/size/theme can be declared from LuxScript itself and a route can open
 file/folder pickers, notifications, the clipboard... This repo is the home of
 that module; apps vendor it from here. Any change to Lux itself is made in the
 main Lux repo and then re-vendored, never edited in `vendor/lux/`.
-Exception, local patch pending upstreaming: `LUX_THREADS` env var (`src/app.cpp`); plus a `gtk_main_quit` guard in
-`third_party/webview/webview.h`.
+(`LUX_THREADS`, used by the shells, is part of Lux stable.) `third_party/webview/webview.h` carries a local
+`gtk_main_quit` guard.
 The desktop shell starts the app with Lux's own `main()` (`lux_main()`, built
 with `LUX_EMBEDDED`) on a thread, so it behaves exactly like `lux ./app`.
 
@@ -229,6 +229,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ./build/app        # the packaged binary -- respack embeds a snapshot of app/
 ```
+
+## Tests
+
+`tests/smoke.py` runs `build/app` in a sandbox (temp HOME/XDG, its own Luxium host socket, its own X server: Xvfb, else
+Xephyr) and checks: server on loopback, window through the host, routes, SIGTERM leaves no orphan process, no port
+and no host socket, plus the WebKitGTK fallback (forced, and with no luxium binary). `tests/stability.py` covers
+failure modes: host killed mid-session (the window reopens in a fresh host), slow or absent host, two instances,
+shutdown with half-sent requests, garbage / huge / truncated lines from the host. Both take `--app`, `--luxium`,
+`--display` and scenario names; point `--app` at an ASan build to run them under a sanitizer.
 
 ## Installing it as a real app
 
