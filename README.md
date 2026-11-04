@@ -8,7 +8,7 @@ separately, no crate tree to download.
 
 Lux is vendored as plain source under `vendor/lux/` (copied in, not a git
 submodule — no network access needed to build this project once it's
-checked out), taken from the `luxium` branch of the main Lux repo (see
+checked out), taken from the `stable` branch of the main Lux repo (see
 `vendor/lux/VENDORED` for the exact commit), with one
 documented addition that is NOT in Lux: a `window` module
 (`vendor/lux/src/lux_script/modules/window.cpp`, `window_config.hpp`,

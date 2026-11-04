@@ -1,5 +1,5 @@
-Source: Lux @181e01b6669008837c3078f881a7197b5a68b60e, branch luxium, 2026-11-03.
-Refresh: git -C ../Lux archive origin/luxium | tar -x into vendor/lux (after git rm -rq vendor/lux; rm -rf vendor/lux).
+Source: Lux @181e01b6669008837c3078f881a7197b5a68b60e, branch stable, 2026-11-03.
+Refresh: git -C ../Lux archive origin/stable | tar -x into vendor/lux (after git rm -rq vendor/lux; rm -rf vendor/lux).
 Lux-Local-only files (kept on refresh, NOT in Lux):
   src/lux_script/modules/window.cpp
   include/lux_script/window_config.hpp
