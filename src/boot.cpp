@@ -16,7 +16,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-int lux_main(int argc, char** argv);   // vendor/lux main.cpp, compiled with LUX_EMBEDDED
+int lux_main(int argc, char** argv);   // Lux main.cpp, compiled with LUX_EMBEDDED
 
 namespace fs = std::filesystem;
 

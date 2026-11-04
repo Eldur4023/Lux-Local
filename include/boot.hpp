@@ -1,6 +1,6 @@
 #pragma once
 // The platform-independent half of the Android shell: unpack the embedded resources and run the app's
-// Lux server on loopback. This Lux version runs apps through its own main() (vendor/lux main.cpp,
+// Lux server on loopback. This Lux version runs apps through its own main() (Lux main.cpp,
 // compiled with LUX_EMBEDDED -- the same entry the desktop shell uses), on a thread of this process.
 // (Mail and Lux-Local have a different Lux and a boot.cpp built on lux::App; same interface.)
 #include <atomic>

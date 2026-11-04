@@ -21,7 +21,7 @@ inline std::mutex g_window_mutex;
 
 // Backs the `window` LuxScript module's callable functions
 // (window.minimize(), window.open_file()...) -- see
-// vendor/lux/src/lux_script/modules/window.cpp and window_control.hpp.
+// the window module and window_control.hpp.
 // Every hook grabs g_window under the lock and releases it before doing
 // anything that might block (pick_file can wait on the user for a while),
 // so a slow file dialog never holds up set_title()/minimize()/etc.

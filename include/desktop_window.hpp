@@ -9,11 +9,11 @@
 // Thin wrapper over the vendored webview.h C API (third_party/webview/webview.h)
 // -- a single header wrapping WebKitGTK, no Chromium/Node bundled, nothing to
 // download. Lux itself is untouched: this project only depends on it as a
-// library (vendor/lux), and everything GUI-related lives here instead.
+// library (the Lux sources), and everything GUI-related lives here instead.
 //
 // set_menu() takes a lux_script::Value directly (the same List<Dict>/Json
 // LuxScript itself works with) rather than a parallel C++ menu-description
-// type: window.cpp (vendor/lux) hands it over as-is, and building the
+// type: window.cpp (the Lux sources) hands it over as-is, and building the
 // actual GtkMenu from it is entirely this class's job.
 class DesktopWindow final : public WindowBackend {
 public:
@@ -33,8 +33,8 @@ public:
     // Thread-safe: makes run() return, as if the user had closed the window.
     void terminate() override;
 
-    // The rest back the `window` LuxScript module (vendor/lux/src/lux_script/
-    // modules/window.cpp) via WindowControl -- see runtime.cpp for
+    // The rest back the `window` LuxScript module (the
+    // window module) via WindowControl -- see runtime.cpp for
     // how the hooks get wired up. All thread-safe: a route handler calling
     // these runs on an event-loop or blocking_pool thread, never the
     // window's own.

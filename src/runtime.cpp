@@ -5,7 +5,7 @@
 // result. One binary, no arguments, no separate runtime to install.
 //
 // Window title/size come from app/app.lux's own `window:` block (see
-// vendor/lux/src/lux_script/modules/window.cpp), never from here or from
+// the window module), never from here or from
 // CMakeLists.txt: this file has nothing app-specific in it.
 #include "applog.hpp"
 #include "extract.hpp"
@@ -49,7 +49,7 @@
 
 namespace fs = std::filesystem;
 
-int lux_main(int argc, char** argv);   // vendor/lux main.cpp, compiled with LUX_EMBEDDED
+int lux_main(int argc, char** argv);   // Lux main.cpp, compiled with LUX_EMBEDDED
 
 #ifdef _WIN32
 // Winsock spelling of the few POSIX socket calls used below.
@@ -275,6 +275,30 @@ int main(int argc, char** argv) {
 #endif
     bool install = argc > 1 && std::string(argv[1]) == "--install-desktop";
 
+    // Tools shipped next to the executable (an app's ffmpeg/ffprobe, say): that directory goes first on PATH, so
+    // the app's proc.start("ffmpeg") finds the bundled ones before any system install.
+    {
+        fs::path exe;
+#ifdef _WIN32
+        wchar_t buf[32768];
+        if (DWORD n = GetModuleFileNameW(nullptr, buf, 32768); n > 0 && n < 32768) exe = buf;
+#else
+        std::error_code ec;
+        exe = fs::read_symlink("/proc/self/exe", ec);
+#endif
+        if (!exe.empty()) {
+#ifdef _WIN32
+            std::wstring path = L"PATH=" + exe.parent_path().wstring();
+            if (const wchar_t* old = _wgetenv(L"PATH"); old && *old) path += L";" + std::wstring(old);
+            _wputenv(path.c_str());
+#else
+            std::string path = exe.parent_path().string();
+            if (const char* old = std::getenv("PATH"); old && *old) path += ":" + std::string(old);
+            ::setenv("PATH", path.c_str(), 1);
+#endif
+        }
+    }
+
     // Resources are extracted to a PERSISTENT directory (XDG data home), not
     // a temp one: anything the app writes next to its own sources at runtime
     // -- today that is the SQLite database under ./data/ -- has to survive
@@ -314,7 +338,7 @@ int main(int argc, char** argv) {
         return install_desktop(mod, work_dir);
     }
 
-    // The UI server is Lux itself (vendor/lux main.cpp, built with LUX_EMBEDDED),
+    // The UI server is Lux itself (Lux main.cpp, built with LUX_EMBEDDED),
     // run on a thread in this process so `window.*` reaches this very window.
     // It must only ever be reachable from this machine.
     const std::string& host = mod->program.app.host;
