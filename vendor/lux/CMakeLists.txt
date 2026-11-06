@@ -33,6 +33,45 @@ if(WIN32 AND LUX_IO_URING)
     message(WARNING "LUX_IO_URING is Linux-only: ignored on Windows")
     set(LUX_IO_URING OFF CACHE BOOL "" FORCE)
 endif()
+# Optimised builds, on by default and invisible to the developer: LTO (fat objects, so the .a
+# archives still link into the .so that --native generates) plus profile-guided optimisation
+# from the profile committed in pgo/ (about -18% user CPU per request on the forum bench; SQLite
+# is half of the instructions and is built here with the same flags).  The profile is applied
+# when it exists and the compiler is GCC; code the profile never saw is compiled normally
+# (-fprofile-partial-training) and a profile older than the sources only costs the changed
+# functions their data.  -DLUX_PGO=off skips it; tools/pgo.sh regenerates pgo/ (LUX_PGO=gen builds
+# the instrumented binary).
+option(LUX_LTO "Link-time optimisation (-flto, fat objects)" ON)
+set(LUX_PGO "auto" CACHE STRING "Profile-guided build: auto (use pgo/ if present), off, gen (instrumented), use")
+set(LUX_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the instrumented binary writes its .gcda files")
+set(LUX_PGO_PROFILE "${CMAKE_SOURCE_DIR}/pgo" CACHE PATH "The committed profile applied by LUX_PGO=auto/use")
+set(_pgo "${LUX_PGO}")
+if(_pgo STREQUAL "" OR _pgo STREQUAL "auto")   # "" = a build dir configured before auto existed
+    file(GLOB _pgo_files "${LUX_PGO_PROFILE}/*.gcda")
+    if(_pgo_files AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(_pgo use)
+    else()
+        set(_pgo off)
+    endif()
+endif()
+if(NOT WIN32)
+    if(LUX_LTO AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")   # -flto=auto and fat objects are GCC; clang (the NDK) builds without
+        add_compile_options(-flto=auto -ffat-lto-objects)
+        add_link_options(-flto=auto)
+    endif()
+    # Profile names carry the object's path: strip the build dir so any build tree finds them.
+    if(_pgo STREQUAL "gen")
+        add_compile_options(-fprofile-generate=${LUX_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-update=prefer-atomic)
+        add_link_options(-fprofile-generate=${LUX_PGO_DIR})
+    elseif(_pgo STREQUAL "use")
+        add_compile_options(-fprofile-use=${LUX_PGO_PROFILE} -fprofile-prefix-path=${CMAKE_BINARY_DIR}
+                            -fprofile-correction -fprofile-partial-training
+                            -Wno-missing-profile -Wno-coverage-mismatch -Wno-error=coverage-mismatch)
+    elseif(NOT _pgo STREQUAL "off")
+        message(FATAL_ERROR "LUX_PGO must be auto, off, gen or use")
+    endif()
+endif()
+
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
 # HTTPS in the server itself (tls: cert / key). Off by default: without it the
 # core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
@@ -294,8 +333,30 @@ target_compile_definitions(lux_script PRIVATE
     LUX_NATIVE_LIB="$<TARGET_FILE:lux>")
 
 if(LUX_SQLITE)
-    find_path(SQLITE3_INC sqlite3.h)
-    find_library(SQLITE3_LIB sqlite3)
+    # SQLite is ~half of the instructions per request on a database-bound route, and the
+    # distro's libsqlite3 is a generic build outside LTO/PGO.  By default the amalgamation in
+    # third_party/sqlite is compiled here: tuned flags (no mutex per connection --Lux opens them
+    # NOMUTEX--, no memstatus, no shared cache, no deprecated API) and the same -O3/LTO/PGO as the
+    # rest.  Keeps FTS5/RTREE/math functions, the authorizer and decltype (the result cache and the
+    # BOOLEAN columns need them).  LUX_SQLITE_SYSTEM=ON links the system library instead.
+    option(LUX_SQLITE_SYSTEM "Link the system libsqlite3 instead of the vendored amalgamation" OFF)
+    if(NOT LUX_SQLITE_SYSTEM AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/sqlite3.c)
+        add_library(lux_sqlite3 STATIC third_party/sqlite/sqlite3.c)
+        set_target_properties(lux_sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_definitions(lux_sqlite3 PRIVATE
+            SQLITE_THREADSAFE=2 SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_OMIT_SHARED_CACHE
+            SQLITE_OMIT_DEPRECATED SQLITE_OMIT_LOAD_EXTENSION SQLITE_LIKE_DOESNT_MATCH_BLOBS
+            SQLITE_USE_ALLOC_SIZE SQLITE_MAX_EXPR_DEPTH=0 SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+            SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_MATH_FUNCTIONS)
+        target_compile_options(lux_sqlite3 PRIVATE -O3 -w)
+        set(SQLITE3_INC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite)
+        set(SQLITE3_LIB lux_sqlite3)
+        find_package(Threads)
+        target_link_libraries(lux_sqlite3 PUBLIC ${CMAKE_DL_LIBS} Threads::Threads m)
+    else()
+        find_path(SQLITE3_INC sqlite3.h)
+        find_library(SQLITE3_LIB sqlite3)
+    endif()
     if(SQLITE3_INC AND SQLITE3_LIB)
         target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp src/lux_script/sqlite_replica.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_SQLITE)
@@ -557,6 +618,11 @@ add_test(NAME sqlite
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+# The result cache: what makes a cached SELECT stale, and what must never be cached.
+add_test(NAME sqlite_cache
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_cache.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite_cache PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 # The single writer and `replicate` (directories; s3/sftp need real targets).
 add_test(NAME sqlite_replica
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_replica.sh $<TARGET_FILE:lux-bin>

@@ -31,6 +31,8 @@
 #include <optional>
 #include <string>
 #include <mutex>
+#include <thread>
+#include <unistd.h>
 
 namespace {
 std::mutex                 g_mutex;
@@ -169,8 +171,28 @@ void install_keyring_hooks() {
 #endif
 }
 
+// Lux's stdout/stderr (compile errors, "Lux running on ...") would vanish on Android: send them to logcat.
+// The thread sleeps in read(): no wake-ups of its own.
+void pipe_stdio_to_logcat() {
+    int fds[2];
+    if (::pipe(fds) != 0) return;
+    ::dup2(fds[1], 1);
+    ::dup2(fds[1], 2);
+    std::thread([fd = fds[0]] {
+        std::string line;
+        char buf[512];
+        for (ssize_t n; (n = ::read(fd, buf, sizeof buf)) > 0;)
+            for (ssize_t i = 0; i < n; i++) {
+                if (buf[i] != '\n') { line += buf[i]; continue; }
+                __android_log_write(ANDROID_LOG_INFO, "luxlocal", line.c_str());
+                line.clear();
+            }
+    }).detach();
+}
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_vm = vm;
+    pipe_stdio_to_logcat();
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     g_cls = static_cast<jclass>(env->NewGlobalRef(env->FindClass("dev/lux/local/LuxLocal")));

@@ -75,12 +75,16 @@ class MainActivity : Activity() {
     // Apps that sync real folders (Drive) need "All files access" (Android 11+); asked once. Off here (res/values/config.xml).
     override fun onResume() {
         super.onResume()
+        web.onResume(); web.resumeTimers()
         if (resources.getBoolean(R.bool.needs_all_files) && android.os.Build.VERSION.SDK_INT >= 30 &&
             !android.os.Environment.isExternalStorageManager() && !getSharedPreferences("luxlocal", MODE_PRIVATE).getBoolean("askedFiles", false)) {
             getSharedPreferences("luxlocal", MODE_PRIVATE).edit().putBoolean("askedFiles", true).apply()
             runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
         }
     }
+
+    // Hidden: freeze the page's timers and rendering (its 60 s refresh would otherwise keep waking the CPU).
+    override fun onPause() { web.onPause(); web.pauseTimers(); super.onPause() }
 
     override fun onDestroy() { if (LuxLocal.activity === this) LuxLocal.activity = null; super.onDestroy() }
 

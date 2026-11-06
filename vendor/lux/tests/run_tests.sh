@@ -627,6 +627,76 @@ check_html() {
 check_luxp "render() -> .luxp with the template's data"    '/hello?who=Zoe' 'Zoe'
 check_luxp "{{ }} inside the page's <script>"               '/hello?who=Zoe' 'Hola desde LuxScript, '
 check_luxp "<link> through a static mount, and its @import" '/hello'         'rebeccapurple'
+check_luxp "{{ }} in a <script>: a backslash, a quote and a line break stay in the string" '/hello?who=a%5Cb%22c%0Ad' 'Hola desde LuxScript, '
+# the program is compiled once and its string constants patched per request: each answer carries its own value
+check_luxp "{{ }} in a <script>: the program holds this request's value"   '/hello?who=Zoe' 'Zoe!!'
+check_luxp "{{ }} in a <script>: ...and the next request's, not the first's" '/hello?who=Ana' 'Ana!!'
+check_luxp "{{ }} in a <script>: an escaped value reaches the constant decoded" '/hello?who=a%5Cb%22c%0Ad' 'a\b"c'
+# a .luxp carries an ETag (a hash of its bytes); a client that holds those bytes gets a 304 without a body
+luxp_etag=$(curl -sS --max-time 10 -D - -o /dev/null -H "Accept: application/x-luxp" "http://127.0.0.1:$PORT/hello?who=Zoe" | tr -d '\r' | awk 'tolower($1)=="etag:" {print $2}')
+luxp_304=$(curl -sS --max-time 10 -o "$TMP/body304" -w '%{http_code} %{size_download}' -H "Accept: application/x-luxp" -H "If-None-Match: $luxp_etag" "http://127.0.0.1:$PORT/hello?who=Zoe")
+[ -n "$luxp_etag" ] && [ "$luxp_304" = "304 0" ] && ok ".luxp: ETag, and If-None-Match answers 304 with no body" || fail ".luxp: ETag + 304" "304 0" "etag=$luxp_etag got=$luxp_304"
+luxp_other=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Accept: application/x-luxp" -H "If-None-Match: $luxp_etag" "http://127.0.0.1:$PORT/hello?who=Ana")
+[ "$luxp_other" = "200" ] && ok ".luxp: the same ETag does not match a different page" || fail ".luxp: other page" "200" "$luxp_other"
+# blocks: the stylesheet and the program carry an id; a client that announces them (X-Luxp-Have) gets
+# only references, the document still in full, and a reader without them refuses the answer
+curl -sS --max-time 10 -H "Accept: application/x-luxp" -o "$TMP/blk_full" "http://127.0.0.1:$PORT/hello?who=Zoe"
+luxp_have=$(python3 - "$TMP/blk_full" <<'PY'
+import sys, struct
+d = open(sys.argv[1], "rb").read(); at = 5
+def uv():
+    global at
+    v = s = 0
+    while True:
+        b = d[at]; at += 1; v |= (b & 0x7F) << s; s += 7
+        if b < 0x80: return v
+for _ in range(uv()):
+    n = uv(); at += n
+    ids = []
+    for k in range(3):
+        f = d[at]; at += 1
+        if f & 4: ids.append(struct.unpack("<Q", d[at:at + 8])[0]); at += 8
+        uv(); n = uv(); at += n
+print(",".join("%016x" % i for i in ids))
+PY
+)
+curl -sS --max-time 10 -H "Accept: application/x-luxp" -H "X-Luxp-Have: $luxp_have" -o "$TMP/blk_ref" "http://127.0.0.1:$PORT/hello?who=Zoe"
+python3 "$HERE/luxp_dump.py" "$TMP/blk_ref" > "$TMP/blk_dump" 2>/dev/null
+if [ -n "$luxp_have" ] && [ "$(stat -c %s "$TMP/blk_ref")" -lt "$(stat -c %s "$TMP/blk_full")" ] \
+   && grep -qaF Zoe "$TMP/blk_dump" && ! grep -qaF rebeccapurple "$TMP/blk_dump"
+then ok ".luxp: blocks the client announced (X-Luxp-Have) are left out as references"
+else fail ".luxp: blocks" "references instead of the stylesheet" "have=$luxp_have full=$(stat -c %s "$TMP/blk_full") ref=$(stat -c %s "$TMP/blk_ref")"; fi
+# traced document: a client that says X-Luxp-Caps: trace gets the template as a block and the values as a trace;
+# the next answer leaves the template out, and the values (here 'Zoe') still reach the client
+curl -sS --max-time 10 -H "Accept: application/x-luxp" -H "X-Luxp-Caps: trace" -o "$TMP/trc_full" "http://127.0.0.1:$PORT/hello?who=Zoe"
+luxp_have2=$(python3 - "$TMP/trc_full" <<'PY'
+import sys, struct
+d = open(sys.argv[1], "rb").read(); at = 5
+def uv():
+    global at
+    v = s = 0
+    while True:
+        b = d[at]; at += 1; v |= (b & 0x7F) << s; s += 7
+        if b < 0x80: return v
+for _ in range(uv()):
+    n = uv(); at += n
+    traced = d[at] & 3 == 3
+    if traced: at += 1
+    ids = []
+    for k in range(4 if traced else 3):
+        f = d[at]; at += 1
+        if f & 3 == 2: ids.append(struct.unpack("<Q", d[at:at + 8])[0]); at += 8; continue
+        if f & 4: ids.append(struct.unpack("<Q", d[at:at + 8])[0]); at += 8
+        uv(); n = uv(); at += n
+    print(("traced " if traced else "plain ") + ",".join("%016x" % i for i in ids))
+PY
+)
+curl -sS --max-time 10 -H "Accept: application/x-luxp" -H "X-Luxp-Caps: trace" -H "X-Luxp-Have: ${luxp_have2#* }" -o "$TMP/trc_ref" "http://127.0.0.1:$PORT/hello?who=Zoe"
+python3 "$HERE/luxp_dump.py" "$TMP/trc_ref" > "$TMP/trc_dump" 2>/dev/null
+case "$luxp_have2" in traced*) trc_ok=1 ;; *) trc_ok=0 ;; esac
+if [ "$trc_ok" = 1 ] && [ "$(stat -c %s "$TMP/trc_ref")" -lt "$(stat -c %s "$TMP/trc_full")" ] && grep -qaF Zoe "$TMP/trc_dump"
+then ok ".luxp: the document as template block + trace; the template is left out once announced"
+else fail ".luxp: traced document" "traced, smaller the second time" "have=$luxp_have2 full=$(stat -c %s "$TMP/trc_full") ref=$(stat -c %s "$TMP/trc_ref")"; fi
 check_luxp "constant render(): translated at startup"       '/fixed'         'cambiada por LuxScript'
 check "same route, any other browser: HTML" GET '/hello?who=Zoe' 200 '<h1 id="t">Hola Zoe</h1>'
 check_luxp "plan: values in text and attributes"          '/plan?who=Zoe&n=3'   'Item <2> & "co" '"'"'x'"'"
@@ -753,6 +823,37 @@ t1=$(date +%s)
 if kill -0 "$SRV" 2>/dev/null; then fail "SIGTERM with an open sse stream exits promptly" "exit within 10 s" "still running after $((t1 - t0)) s"
 else ok "SIGTERM with an open sse stream exits promptly ($((t1 - t0)) s, not the 30 s grace period)"; fi
 kill_wait $SRV; SRV=""
+
+echo "== static mount: validators, small-file cache, precompressed variants =="
+mkdir -p "$TMP/site"
+printf 'body{}\n' > "$TMP/site/a.css"; printf 'x\n' > "$TMP/site/report-20261104.css"; printf 'y\n' > "$TMP/site/app.abc123ef.js"
+printf '<html>i</html>\n' > "$TMP/site/index.html"
+gzip -k "$TMP/site/a.css"; touch "$TMP/site/a.css.gz"   # not older than the file
+printf 'app:\n    port 8089\n\n    static "/" -> "%s" spa\n' "$TMP/site" > "$TMP/site.lux"
+next_server "$TMP/site.lux" /index.html || exit 1
+hdr() { curl -sSi --max-time 5 "$@" | tr -d '\r'; }
+h=$(hdr "http://127.0.0.1:$PORT/report-20261104.css")
+[[ "$h" == *"max-age=3600, must-revalidate"* && "$h" != *immutable* ]] && ok "a digits-only name is not a hash" || fail "digits-only name" "no immutable" "$h"
+h=$(hdr "http://127.0.0.1:$PORT/app.abc123ef.js")
+[[ "$h" == *immutable* ]] && ok "a hex hash name is immutable" || fail "hashed name" "immutable" "$h"
+h=$(hdr "http://127.0.0.1:$PORT/a.css"); etag=$(grep -i '^etag' <<<"$h" | cut -d' ' -f2); lm=$(grep -i '^last-modified' <<<"$h" | cut -d' ' -f2-)
+[ -n "$lm" ] && ok "static: Last-Modified" || fail "static Last-Modified" "a date" "$h"
+h=$(hdr -H "If-None-Match: W/\"zz\", $etag" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 304"* && "${h,,}" != *content-length* ]] && ok "static: 304 for an ETag in a list, no Content-Length" || fail "static 304 list" "304 without Content-Length" "$h"
+h=$(hdr -H "If-Modified-Since: $lm" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 304"* ]] && ok "static: 304 for If-Modified-Since" || fail "static IMS" "304" "$h"
+h=$(hdr -H "If-Modified-Since: Thu, 01 Jan 1970 00:00:00 GMT" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 200"* ]] && ok "static: an older If-Modified-Since is a 200" || fail "static IMS old" "200" "$h"
+h=$(hdr -H "Accept-Encoding: gzip" "http://127.0.0.1:$PORT/a.css")
+[[ "${h,,}" == *"content-encoding: gzip"* && "${h,,}" == *"vary: accept-encoding"* ]] && ok "static: precompressed .gz variant" || fail "static .gz" "Content-Encoding: gzip" "$h"
+[ "$(curl -s -H 'Accept-Encoding: gzip' "http://127.0.0.1:$PORT/a.css" | gzip -dc)" = "body{}" ] && ok "static: the .gz body is the file's" || fail "static .gz body" "body{}" "?"
+[ "$(curl -s -H 'Accept-Encoding: gzip;q=0' "http://127.0.0.1:$PORT/a.css")" = "body{}" ] && ok "static: gzip;q=0 gets the plain file" || fail "static q=0" "body{}" "?"
+[ "$(curl -s -r 0-3 "http://127.0.0.1:$PORT/a.css")" = "body" ] && ok "static: Range bypasses the cache" || fail "static Range" "body" "?"
+# the cache notices a change within a second
+printf 'p{}\n' > "$TMP/site/a.css"; rm -f "$TMP/site/a.css.gz"; sleep 1.3
+[ "$(curl -s "http://127.0.0.1:$PORT/a.css")" = "p{}" ] && ok "static: the cache follows a changed file" || fail "static cache revalidation" "p{}" "$(curl -s "http://127.0.0.1:$PORT/a.css")"
+h=$(hdr -H "Accept-Encoding: gzip" "http://127.0.0.1:$PORT/a.css")
+[[ "${h,,}" != *"content-encoding"* ]] && ok "static: a removed variant is no longer served" || fail "static removed .gz" "no Content-Encoding" "$h"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 

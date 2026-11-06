@@ -111,6 +111,7 @@ option(LUX_DESKTOP_LUXIUM "Linux: open app windows in the shared Luxium host whe
 # Desktop: GTK3 + WebKitGTK via the vendored webview.h. Android: no native window at all -- the Kotlin side
 # hosts a WebView and this project builds only libluxlocal.so (src/android.cpp + boot.cpp). respack runs
 # on the BUILD machine, so a cross build passes the host one: -DLUX_HOST_RESPACK=/path/to/respack
+option(LUX_ANDROID_NATIVE "Android: compile the app's --native code into libluxlocal.so (needs -DLUX_HOST_LUX)" OFF)
 if(ANDROID)
     if(NOT LUX_HOST_RESPACK)
         message(FATAL_ERROR "Android build: build respack on the host first and pass -DLUX_HOST_RESPACK=<path>")
@@ -230,7 +231,29 @@ function(add_lux_desktop_app name)
     set_source_files_properties(${_lux_main} PROPERTIES COMPILE_DEFINITIONS LUX_EMBEDDED)
     if(ANDROID)
         # The Activity loads this as System.loadLibrary("luxlocal"): the name is fixed, whatever the app is called.
-        add_library(luxlocal SHARED src/android.cpp src/boot.cpp ${_lux_main} ${_generated})
+        set(_native_src "")
+        if(LUX_ANDROID_NATIVE)
+            # The app's --native code, built ahead of time: a host `lux` (tools/android-build.sh builds it; -DLUX_HOST_LUX=
+            # <path>) writes the generated C++ (LUX_NATIVE_EMIT, see native_build.cpp) and it is compiled into the library,
+            # where boot.cpp finds it. No compiler is needed on the phone and no code generation at start-up.
+            if(NOT LUX_HOST_LUX)
+                message(FATAL_ERROR "LUX_ANDROID_NATIVE needs -DLUX_HOST_LUX=<host lux binary built from vendor/lux>")
+            endif()
+            set(_native_src ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_native.cpp)
+            add_custom_command(
+                OUTPUT  ${_native_src}
+                COMMAND ${CMAKE_COMMAND} -E rm -f ${_native_src}
+                COMMAND ${CMAKE_COMMAND} -E touch ${_native_src}   # nothing representable: an empty file, bytecode at run time
+                COMMAND ${CMAKE_COMMAND} -E env LUX_NATIVE_EMIT=${_native_src} ${LUX_HOST_LUX} --native --check .
+                WORKING_DIRECTORY ${APP_DIR}
+                DEPENDS ${_app_files} ${LUX_HOST_LUX}
+                COMMENT "luxdesktop: generating native code for ${name}"
+                VERBATIM
+            )
+            set_source_files_properties(${_native_src} PROPERTIES
+                COMPILE_OPTIONS "-std=gnu++23;-O2;-fno-semantic-interposition")
+        endif()
+        add_library(luxlocal SHARED src/android.cpp src/boot.cpp ${_lux_main} ${_generated} ${_native_src})
         target_include_directories(luxlocal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_link_libraries(luxlocal PRIVATE
             -Wl,--whole-archive lux_script -Wl,--no-whole-archive

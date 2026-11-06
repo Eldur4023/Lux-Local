@@ -1,4 +1,4 @@
-Source: Lux @05fbd3582f940eb414328f34a793fc0817fd146f, branch stable, 2026-11-04.
+Source: Lux @12b1dd897678f466686297722cd098d9530ff7f8, branch stable, 2026-11-06.
 Refresh: git -C ../Lux archive origin/stable | tar -x into vendor/lux (after git rm -rq vendor/lux; rm -rf vendor/lux).
 Lux-Local-only files (kept on refresh, NOT in Lux):
   src/lux_script/modules/window.cpp

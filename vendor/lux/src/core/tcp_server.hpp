@@ -44,6 +44,9 @@ public:
     // ONLY from its own loop's thread: it touches the handler map, which the
     // loop is reading in its epoll_wait.  From outside, use request_stop().
     void stop_accepting();
+    // Linux: this listener is the one the kernel prefers for connections whose packets arrive on `cpu` (SO_INCOMING_CPU
+    // on a SO_REUSEPORT group). Meant for loop threads pinned to that cpu; a no-op elsewhere.
+    void prefer_cpu(int cpu);
 
     // The same, requested from another thread.
     //
@@ -77,7 +80,7 @@ private:
     bool stopping_ = false;
 
     void on_accept();
-    void adopt(int client_fd);
+    void adopt(int client_fd, std::string peer_ip);
     void register_listen_fd();
 };
 

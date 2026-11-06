@@ -6,6 +6,7 @@
 #include "resources.hpp"
 
 #include <chrono>
+#include <version>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -19,7 +20,11 @@ inline void extract_resources(const std::filesystem::path& dir) {
         if (in >> cur && cur == kEmbeddedStamp) return;
     }
     using namespace std::chrono;
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
     const auto fixed = clock_cast<fs::file_time_type::clock>(sys_seconds{seconds{1577836800}});   // 2020-01-01 UTC
+#else   // libc++ (Android NDK) has no clock_cast; its file clock counts from the Unix epoch
+    const auto fixed = fs::file_time_type(duration_cast<fs::file_time_type::duration>(seconds{1577836800}));
+#endif
     for (const auto& f : kEmbeddedFiles) {
         fs::path dest = dir / fs::path(std::u8string(reinterpret_cast<const char8_t*>(f.path)));   // embedded paths are UTF-8
         fs::create_directories(dest.parent_path());

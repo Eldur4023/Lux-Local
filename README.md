@@ -322,6 +322,11 @@ Gradle project in `android/` (a plain `Activity` + `WebView` + `LuxLocal.kt`); `
     ANDROID_NDK=... tools/android-build.sh arm64-v8a x86_64
     cd android && gradle assembleDebug          # JDK 17, Gradle 8.7, SDK 34 (sdk.dir in local.properties)
 
+`LUX_ANDROID_NATIVE=1 tools/android-build.sh ...` also compiles the app's `--native` code into `libluxlocal.so` (ahead of time: a host
+`lux` writes the generated C++ with `LUX_NATIVE_EMIT`, the NDK compiles it; no compiler on the phone, no code generation at start-up).
+`boot.cpp` passes `--native` only when that code is in the library; if the app changed since it was built, it runs on bytecode and says so in logcat.
+Off by default: the build fails if the generated C++ does not compile with the NDK.
+
 Checked on an x86_64 emulator (Android 14): the demo app boots, serves over loopback and the +1 button round-trips
 to the Lux server. Not tested on a real arm64 device.
 
@@ -331,8 +336,9 @@ Android, uses `lux_script::keyring_control()` hooks that `src/android.cpp` point
 8.19.0-8.22.0 return an empty body for custom IMAP commands (`UID FETCH ...`).
 
 `window.notify` is wired to a system notification. Background sync needs no foreground service (so no permanent notification):
-`Sync.kt` chains wake-up alarms that call `POST /api/sync` every 2 minutes -- that route is the app's own business (Mail's notifies new mail
-through `window.notify`). TLS: `src/android.cpp` builds a PEM bundle from the system CAs (`SSL_CERT_FILE`), which the `http`/`mail`/`imap`
+`Sync.kt` (opt-in: `background_sync` in `res/values/config.xml`) chains inexact wake-up alarms (~15 min) that call `POST /api/sync?light=1` --
+that route is the app's own business (Mail's only checks UIDNEXT and downloads what is new, and notifies through `window.notify`). The WebView's
+timers are paused while the Activity is hidden. TLS: `src/android.cpp` builds a PEM bundle from the system CAs (`SSL_CERT_FILE`), which the `http`/`mail`/`imap`
 modules hand to curl through `lux_curl_init()`.
 
 The `window` hooks wired on Android: `notify`, `pick_file`/`pick_folder` (system document/folder pickers; downloads go to

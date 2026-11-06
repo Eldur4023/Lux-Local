@@ -686,7 +686,8 @@ How much a request costs depends on the template:
 
 Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
 computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
-plans off.
+plans off. `LUX_LUXP_ZLEVEL=1` deflates each page's document before sending it (about half the
+bytes, ~17 µs of CPU per page): for when the connection, not the CPU, is the bottleneck.
 
 A static site, without a server:
 
@@ -953,7 +954,7 @@ production.
 
 | Module | Keys |
 |---|---|
-| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica) |
+| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica), `result_cache` (`off` to disable), `result_cache_ms`, `result_cache_mb` |
 | `postgres` | `url`, or else `host` / `port` / `database` (required) / `user` / `password`; `pool` |
 | `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
 
@@ -969,6 +970,22 @@ unique constraint say, fails alone. Your `await` returns once its batch has **co
 a query right after it sees the write. `last_id()` is the id of **your** insert, even with
 other requests' inserts in the same batch. Transactions (`begin()`) and statements that cannot
 run inside one (`pragma`, `vacuum`, `attach`) go to the pool as before.
+
+### SQLite: the result cache
+
+A `select` whose result is asked for again is answered from memory while the tables it reads have
+not been written: no statement runs, no row is rebuilt. Lux knows which tables a statement reads
+(SQLite reports it while compiling) and moves a table to a new generation after every commit that
+touched it, so a read after your `await exec(...)` always sees the write. What is **not** cached:
+anything inside a transaction (it must see its own writes), statements with `random()`, `changes()`,
+`last_insert_rowid()` or the date and time functions, `pragma`, tables created `WITHOUT ROWID`,
+virtual tables and attached databases. Every handler gets its own copy of the rows, so editing them
+changes nothing for the next request.
+
+One thing the cache cannot see is **another process** writing the file (a script, the `sqlite3`
+shell): that is picked up when the entry reaches `result_cache_ms` (default 1000). `result_cache_mb`
+caps the memory (default 64). `result_cache off` turns the cache off; so does the environment
+variable `LUX_NO_RESULT_CACHE`.
 
 `replicate` copies every commit, within a second, somewhere else. Give it as many times as
 you want:
@@ -1799,6 +1816,30 @@ What stays on bytecode today: `ws`/`sse` routes, a constructor with a body, a fu
 `session`/`jwt` (a route can), and anything that calls one of those. A runtime error in a
 native route reports the route's own line in `"at"`, where bytecode reports the line inside the
 function that failed.
+
+### Tuning knobs
+
+Environment variables, read at startup:
+
+| Variable | Effect |
+|---|---|
+| `LUX_THREADS=N` | event loops and pool threads, instead of one per CPU the process may use |
+| `LUX_PIN_THREADS=1` | pins loop *i* to the *i*-th usable CPU and asks the kernel (`SO_INCOMING_CPU`) to hand it the connections whose packets arrive there. Meant for a NIC with receive-side scaling; on loopback it changes nothing and the tail gets worse, so it is off |
+| `LUX_NO_RESULT_CACHE=1` | turns the sqlite result cache off (section 12) |
+| `LUX_WAL_HIGH_PAGES=N` | the WAL size (pages, default 32000) past which each write batch waits up to 20 ms for the checkpointer |
+| `LUX_DB_CACHE_STATS=1` | logs the result cache's hits and misses at shutdown |
+
+Every normal build is already optimised: LTO plus a profile-guided pass that applies the profile
+committed in `pgo/` (no extra step for the developer). `-DLUX_PGO=off` skips the profile and
+`-DLUX_LTO=OFF` skips LTO (faster to build while hacking on the C++ core). After big changes to the hot
+paths or a compiler upgrade, regenerate it with `tools/pgo.sh build-pgo -- <training load>` and commit
+`pgo/`; code the profile never saw is compiled normally.
+
+SQLite is compiled from the amalgamation in `third_party/sqlite` (3.53.4, tuned flags: no per-connection
+mutex, no memstatus, no shared cache; FTS5, RTREE and math functions kept) instead of the distro's
+`libsqlite3`, so the profile reaches it too. On the forum bench, user CPU per request went 57.7 -> 48.4 us
+(-16%) with the result cache; without the profile the vendored build equals the system one.
+`-DLUX_SQLITE_SYSTEM=ON` links the system library again.
 
 ## 23. Native modules
 

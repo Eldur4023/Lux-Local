@@ -43,7 +43,7 @@ object Sync {
         LuxLocal.appContext = c.applicationContext
         try {
             val port = LuxLocal.start(c.filesDir.path)
-            if (port > 0) (URL("http://127.0.0.1:$port/api/sync").openConnection() as HttpURLConnection).run {
+            if (port > 0) (URL("http://127.0.0.1:$port/api/sync?light=1").openConnection() as HttpURLConnection).run {
                 requestMethod = "POST"; connectTimeout = 10_000; readTimeout = 45_000
                 setRequestProperty("Connection", "close")   // a pooled keep-alive socket outlives Lux's idle timeout -> 408
                 try {

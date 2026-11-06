@@ -145,7 +145,7 @@ struct SheetReader {
     bool selector(style::Selector& s, int nest) {
         if (nest > kMaxSelNest) return bad("selectores anidados en exceso");
         const uint8_t pseudo = r.u8();
-        if (pseudo > uint8_t(style::Pseudo::Placeholder)) return bad("pseudo-elemento invalido");
+        if (pseudo > uint8_t(style::Pseudo::FirstLine)) return bad("pseudo-elemento invalido");
         s.pseudo = style::Pseudo(pseudo);
         const int64_t spec = r.sv();
         if (spec < 0 || spec > INT32_MAX) return bad("especificidad invalida");
@@ -256,7 +256,9 @@ std::string encode_sheet(const std::vector<style::Rule>& rules) {
     SheetWriter s;
     s.w.uv(rules.size());
     for (const auto& r : rules) {
-        s.w.str(r.media);
+        // the container condition and the @layer ride in the media string
+        s.w.str(r.layer.empty() ? (r.container.empty() ? r.media : r.media + '\x01' + r.container)
+                                : r.media + '\x01' + r.container + '\x03' + r.layer);
         s.w.uv(r.selectors.size());
         for (const auto& sel : r.selectors) s.selector(sel);
         s.w.uv(r.decls.size());
@@ -281,6 +283,8 @@ bool decode_sheet(const std::string& bytes, std::vector<style::Rule>& out, std::
     for (uint32_t i = 0; i < nr && s.r.ok; ++i) {
         style::Rule rule;
         rule.media = s.r.str();
+        if (const size_t ls = rule.media.find('\x03'); ls != std::string::npos) { rule.layer = rule.media.substr(ls + 1); rule.media.resize(ls); }
+        if (const size_t sep = rule.media.find('\x01'); sep != std::string::npos) { rule.container = rule.media.substr(sep + 1); rule.media.resize(sep); }
         const uint32_t nsel = s.r.count(kMaxList, 4);
         for (uint32_t k = 0; k < nsel && s.r.ok; ++k) {
             style::Selector sel;

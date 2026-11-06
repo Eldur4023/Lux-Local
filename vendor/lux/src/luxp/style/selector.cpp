@@ -7,18 +7,6 @@ namespace luxium::style {
 
 namespace {
 
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
-}
-
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
-}
-
 bool ident_char(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
            static_cast<unsigned char>(c) >= 0x80;
@@ -142,6 +130,11 @@ struct Parser {
                     ++c;
                     continue;
                 }
+                if (name == "first-letter" || name == "first-line") {   // also in the one-colon legacy form
+                    pseudo = name == "first-letter" ? Pseudo::FirstLetter : Pseudo::FirstLine;
+                    ++c;
+                    continue;
+                }
                 if (name == "placeholder" || name == "-webkit-input-placeholder") { pseudo = Pseudo::Placeholder; ++c; continue; }
                 if (dbl) { ok = false; return cp; }   // ::marker, ::selection, ...: not supported
                 if (name == "first-child") { ss.kind = SimpleSel::Kind::FirstChild; ++b; }
@@ -178,8 +171,13 @@ struct Parser {
                          name == "nth-of-type" || name == "nth-last-of-type") {
                     std::string arg = paren_arg();
                     const size_t of = lower(arg).find(" of ");
-                    if (of != std::string::npos) arg = arg.substr(0, of);
                     ss.kind = SimpleSel::Kind::Nth;
+                    if (of != std::string::npos) {   // nth-child(an+b of S): counted among the siblings matching S
+                        ss.args = parse_selector_list(arg.substr(of + 4));
+                        if (ss.args.empty()) ok = false;
+                        for (const auto& sel : ss.args) { a += sel.specificity >> 16; b += (sel.specificity >> 8) & 255; c += sel.specificity & 255; }
+                        arg = arg.substr(0, of);
+                    }
                     ss.from_end = name.find("last") != std::string::npos;
                     ss.of_type = name.find("of-type") != std::string::npos;
                     if (!nth(arg, ss.a, ss.b)) ok = false;
@@ -358,11 +356,18 @@ bool simple_matches(const SimpleSel& ss, const dom::Node& el) {
     }
     case K::Nth: {
         if (!el.parent) return false;
+        auto in_set = [&](const dom::Node& n) {
+            if (ss.args.empty()) return true;
+            for (const auto& s : ss.args) if (matches(s, n)) return true;
+            return false;
+        };
+        if (!in_set(el)) return false;
         int before = 0, after = 0;
         bool seen = false;
         for (const auto* sib : element_children(*el.parent)) {
             if (sib == &el) { seen = true; continue; }
             if (ss.of_type && sib->name != el.name) continue;
+            if (!in_set(*sib)) continue;
             (seen ? after : before)++;
         }
         const int pos = (ss.from_end ? after : before) + 1;   // 1-based

@@ -4,6 +4,8 @@
 // compiled with LUX_EMBEDDED -- the same entry the desktop shell uses), on a thread of this process.
 // (Mail and Lux-Local have a different Lux and a boot.cpp built on lux::App; same interface.)
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <cstdint>
 #include <filesystem>
 #include <thread>
@@ -23,5 +25,8 @@ public:
 
 private:
     std::thread       thread_;
-    std::atomic<bool> exited_{false};
+    std::mutex              m_;
+    std::condition_variable cv_;
+    bool                    listening_{false};
+    std::atomic<bool>       exited_{false};
 };
